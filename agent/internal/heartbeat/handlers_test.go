@@ -24,6 +24,7 @@ var allCommandTypes = []string{
 	tools.CmdCollectSoftware,
 	tools.CmdFileList, tools.CmdFileRead, tools.CmdFileWrite,
 	tools.CmdFileDelete, tools.CmdFileMkdir, tools.CmdFileRename,
+	tools.CmdFilesystemAnalysis,
 	tools.CmdTerminalStart, tools.CmdTerminalData,
 	tools.CmdTerminalResize, tools.CmdTerminalStop,
 

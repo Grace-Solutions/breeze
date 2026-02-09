@@ -12,8 +12,8 @@ import {
   X,
   CheckCircle,
   AlertCircle,
-  Trash2,
-  Plus,
+  HardDrive,
+  Sparkles,
   FileText,
   FileCode,
   FileImage,
@@ -43,6 +43,61 @@ export type TransferItem = {
   error?: string;
 };
 
+type DiskAnalysisSummary = {
+  filesScanned: number;
+  dirsScanned: number;
+  bytesScanned: number;
+  maxDepthReached: number;
+  permissionDeniedCount: number;
+};
+
+type DiskLargestFile = {
+  path: string;
+  sizeBytes: number;
+  modifiedAt?: string;
+  owner?: string;
+};
+
+type DiskLargestDirectory = {
+  path: string;
+  sizeBytes: number;
+  fileCount: number;
+};
+
+type DiskAnalysisSnapshot = {
+  id: string;
+  capturedAt: string;
+  trigger: 'on_demand' | 'threshold';
+  partial: boolean;
+  summary: DiskAnalysisSummary;
+  topLargestFiles: DiskLargestFile[];
+  topLargestDirectories: DiskLargestDirectory[];
+};
+
+type DiskCleanupCandidate = {
+  path: string;
+  category: string;
+  sizeBytes: number;
+  modifiedAt?: string;
+};
+
+type DiskCleanupPreview = {
+  cleanupRunId: string | null;
+  snapshotId: string;
+  estimatedBytes: number;
+  candidateCount: number;
+  categories: Array<{ category: string; count: number; estimatedBytes: number }>;
+  candidates: DiskCleanupCandidate[];
+};
+
+type DiskCleanupResult = {
+  cleanupRunId: string | null;
+  status: 'executed' | 'failed';
+  bytesReclaimed: number;
+  selectedCount: number;
+  failedCount: number;
+};
+
 export type FileManagerProps = {
   deviceId: string;
   deviceHostname: string;
@@ -50,6 +105,13 @@ export type FileManagerProps = {
   initialPath: string;
   onError?: (error: string) => void;
   className?: string;
+};
+
+const cleanupCategoryLabels: Record<string, string> = {
+  temp_files: 'Temp Files',
+  browser_cache: 'Browser Cache',
+  package_cache: 'Package Cache',
+  trash: 'Trash'
 };
 
 // Get file icon based on extension
@@ -111,6 +173,12 @@ export default function FileManager({
   const [isDragging, setIsDragging] = useState(false);
   const [sortBy, setSortBy] = useState<'name' | 'size' | 'modified'>('name');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [diskLoadingAction, setDiskLoadingAction] = useState<'scan' | 'preview' | 'execute' | null>(null);
+  const [diskError, setDiskError] = useState<string | null>(null);
+  const [diskSnapshot, setDiskSnapshot] = useState<DiskAnalysisSnapshot | null>(null);
+  const [cleanupPreview, setCleanupPreview] = useState<DiskCleanupPreview | null>(null);
+  const [selectedCleanupPaths, setSelectedCleanupPaths] = useState<Set<string>>(new Set());
+  const [cleanupResult, setCleanupResult] = useState<DiskCleanupResult | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -407,15 +475,158 @@ export default function FileManager({
     }
   }, [entries, selectedItems, initiateDownload]);
 
+  const loadLatestFilesystemSnapshot = useCallback(async () => {
+    try {
+      const response = await fetchWithAuth(`/devices/${deviceId}/filesystem`);
+      if (response.status === 404) {
+        setDiskSnapshot(null);
+        setCleanupPreview(null);
+        setSelectedCleanupPaths(new Set());
+        return;
+      }
+      if (!response.ok) {
+        const json = await response.json().catch(() => ({ error: 'Failed to load filesystem analysis' }));
+        throw new Error(json.error || 'Failed to load filesystem analysis');
+      }
+      const json = await response.json();
+      setDiskSnapshot((json.data ?? null) as DiskAnalysisSnapshot | null);
+      setDiskError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load filesystem analysis';
+      setDiskError(message);
+    }
+  }, [deviceId]);
+
+  const runFilesystemScan = useCallback(async () => {
+    setDiskLoadingAction('scan');
+    setDiskError(null);
+    setCleanupResult(null);
+    try {
+      const response = await fetchWithAuth(`/devices/${deviceId}/filesystem/scan`, {
+        method: 'POST',
+        body: JSON.stringify({
+          path: currentPath,
+          maxDepth: 6,
+          topFiles: 50,
+          topDirs: 30,
+          maxEntries: 200000,
+          timeoutSeconds: 20
+        })
+      });
+
+      if (!response.ok) {
+        const json = await response.json().catch(() => ({ error: 'Filesystem analysis failed' }));
+        throw new Error(json.error || 'Filesystem analysis failed');
+      }
+
+      const json = await response.json();
+      setDiskSnapshot((json.data ?? null) as DiskAnalysisSnapshot | null);
+      setCleanupPreview(null);
+      setSelectedCleanupPaths(new Set());
+      setDiskError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Filesystem analysis failed';
+      setDiskError(message);
+      onError?.(message);
+    } finally {
+      setDiskLoadingAction(null);
+    }
+  }, [currentPath, deviceId, onError]);
+
+  const runCleanupPreview = useCallback(async () => {
+    setDiskLoadingAction('preview');
+    setDiskError(null);
+    setCleanupResult(null);
+    try {
+      const response = await fetchWithAuth(`/devices/${deviceId}/filesystem/cleanup-preview`, {
+        method: 'POST',
+        body: JSON.stringify({})
+      });
+      if (!response.ok) {
+        const json = await response.json().catch(() => ({ error: 'Cleanup preview failed' }));
+        throw new Error(json.error || 'Cleanup preview failed');
+      }
+
+      const json = await response.json();
+      const preview = (json.data ?? null) as DiskCleanupPreview | null;
+      setCleanupPreview(preview);
+      setSelectedCleanupPaths(
+        new Set(preview?.candidates.slice(0, 20).map((candidate) => candidate.path) ?? [])
+      );
+      setDiskError(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Cleanup preview failed';
+      setDiskError(message);
+      onError?.(message);
+    } finally {
+      setDiskLoadingAction(null);
+    }
+  }, [deviceId, onError]);
+
+  const toggleCleanupPath = useCallback((path: string) => {
+    setSelectedCleanupPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
+
+  const executeCleanup = useCallback(async () => {
+    const paths = Array.from(selectedCleanupPaths);
+    if (paths.length === 0) {
+      return;
+    }
+    const confirmed = window.confirm(`Delete ${paths.length} selected cleanup targets?`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDiskLoadingAction('execute');
+    setDiskError(null);
+    try {
+      const response = await fetchWithAuth(`/devices/${deviceId}/filesystem/cleanup-execute`, {
+        method: 'POST',
+        body: JSON.stringify({ paths })
+      });
+      if (!response.ok) {
+        const json = await response.json().catch(() => ({ error: 'Cleanup execution failed' }));
+        throw new Error(json.error || 'Cleanup execution failed');
+      }
+
+      const json = await response.json();
+      setCleanupResult((json.data ?? null) as DiskCleanupResult | null);
+      setCleanupPreview(null);
+      setSelectedCleanupPaths(new Set());
+      await fetchDirectory(currentPath);
+      await loadLatestFilesystemSnapshot();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Cleanup execution failed';
+      setDiskError(message);
+      onError?.(message);
+    } finally {
+      setDiskLoadingAction(null);
+    }
+  }, [currentPath, deviceId, fetchDirectory, loadLatestFilesystemSnapshot, onError, selectedCleanupPaths]);
+
   // Initial load
   useEffect(() => {
     fetchDirectory(initialPath);
   }, [fetchDirectory, initialPath]);
 
+  useEffect(() => {
+    loadLatestFilesystemSnapshot();
+  }, [loadLatestFilesystemSnapshot]);
+
   const breadcrumbs = buildBreadcrumbs(currentPath);
 
   const activeTransfers = transfers.filter(t => ['pending', 'transferring'].includes(t.status));
-  const completedTransfers = transfers.filter(t => ['completed', 'failed'].includes(t.status));
+  const selectedCleanupBytes = cleanupPreview?.candidates
+    .filter((candidate) => selectedCleanupPaths.has(candidate.path))
+    .reduce((sum, candidate) => sum + candidate.sizeBytes, 0) ?? 0;
 
   return (
     <div className={cn('flex flex-col rounded-lg border bg-card shadow-sm overflow-hidden', className)}>
@@ -512,6 +723,130 @@ export default function FileManager({
             </span>
           ))}
         </div>
+      </div>
+
+      {/* Disk Intelligence */}
+      <div className="border-b bg-muted/20 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <HardDrive className="h-4 w-4 text-muted-foreground" />
+            <div>
+              <p className="text-sm font-medium">Disk Cleanup Intelligence</p>
+              <p className="text-xs text-muted-foreground">
+                Fast scan and safe cleanup planning for {currentPath}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={runFilesystemScan}
+              disabled={diskLoadingAction !== null}
+              className="flex h-8 items-center gap-1.5 rounded-md border px-3 text-sm font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {diskLoadingAction === 'scan' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+              Analyze
+            </button>
+            <button
+              type="button"
+              onClick={runCleanupPreview}
+              disabled={diskLoadingAction !== null || !diskSnapshot}
+              className="flex h-8 items-center gap-1.5 rounded-md border px-3 text-sm font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {diskLoadingAction === 'preview' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Preview Cleanup
+            </button>
+            <button
+              type="button"
+              onClick={executeCleanup}
+              disabled={diskLoadingAction !== null || selectedCleanupPaths.size === 0}
+              className="flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              {diskLoadingAction === 'execute' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+              Execute ({selectedCleanupPaths.size})
+            </button>
+          </div>
+        </div>
+
+        {diskError && (
+          <div className="mt-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {diskError}
+          </div>
+        )}
+
+        {diskSnapshot && (
+          <div className="mt-3 space-y-2">
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              <span>Captured: {formatDate(diskSnapshot.capturedAt)}</span>
+              <span>Trigger: {diskSnapshot.trigger === 'threshold' ? 'Threshold' : 'On demand'}</span>
+              <span>Scanned: {diskSnapshot.summary.filesScanned.toLocaleString()} files</span>
+              <span>Data: {formatSize(diskSnapshot.summary.bytesScanned)}</span>
+              {diskSnapshot.partial && <span className="text-amber-600">Partial scan</span>}
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div className="rounded-md border bg-background p-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Largest Files</p>
+                <div className="mt-1 space-y-1">
+                  {diskSnapshot.topLargestFiles.slice(0, 5).map((file) => (
+                    <div key={file.path} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="truncate">{file.path}</span>
+                      <span className="font-medium">{formatSize(file.sizeBytes)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-md border bg-background p-2">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Largest Directories</p>
+                <div className="mt-1 space-y-1">
+                  {diskSnapshot.topLargestDirectories.slice(0, 5).map((dir) => (
+                    <div key={dir.path} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="truncate">{dir.path}</span>
+                      <span className="font-medium">{formatSize(dir.sizeBytes)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {cleanupPreview && (
+          <div className="mt-3 rounded-md border bg-background p-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-medium">Cleanup Preview</span>
+              <span className="text-muted-foreground">
+                {cleanupPreview.candidateCount} candidates · {formatSize(cleanupPreview.estimatedBytes)} potential
+              </span>
+              <span className="text-muted-foreground">
+                Selected: {selectedCleanupPaths.size} · {formatSize(selectedCleanupBytes)}
+              </span>
+            </div>
+            <div className="mt-2 max-h-44 space-y-1 overflow-auto">
+              {cleanupPreview.candidates.slice(0, 40).map((candidate) => (
+                <label key={candidate.path} className="flex items-center justify-between gap-2 rounded px-1 py-1 text-xs hover:bg-muted/60">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedCleanupPaths.has(candidate.path)}
+                      onChange={() => toggleCleanupPath(candidate.path)}
+                    />
+                    <span className="truncate">{candidate.path}</span>
+                  </span>
+                  <span className="whitespace-nowrap text-muted-foreground">
+                    {cleanupCategoryLabels[candidate.category] ?? candidate.category} · {formatSize(candidate.sizeBytes)}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {cleanupResult && (
+          <div className="mt-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            Cleanup {cleanupResult.status}: reclaimed {formatSize(cleanupResult.bytesReclaimed)} from {cleanupResult.selectedCount} target(s)
+            {cleanupResult.failedCount > 0 ? `, ${cleanupResult.failedCount} failed` : ''}.
+          </div>
+        )}
       </div>
 
       {/* File List */}

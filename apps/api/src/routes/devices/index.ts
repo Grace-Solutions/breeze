@@ -10,11 +10,15 @@ import { patchesRoutes } from './patches';
 import { scriptsRoutes } from './scripts';
 import { eventsRoutes } from './events';
 import { eventLogsRoutes } from './eventlogs';
+import { filesystemRoutes } from './filesystem';
 
 export const deviceRoutes = new Hono();
 
 // Mount groups routes first (they have /groups prefix that could conflict with /:id)
 deviceRoutes.route('/', groupsRoutes);
+
+// Mount filesystem routes before core routes so /:id/filesystem resolves cleanly.
+deviceRoutes.route('/', filesystemRoutes);
 
 // Mount core routes (/, /:id, PATCH /:id, DELETE /:id)
 deviceRoutes.route('/', coreRoutes);

@@ -6,6 +6,10 @@ vi.mock('../services', () => ({}));
 vi.mock('../services/auditEvents', () => ({
   writeAuditEvent: vi.fn()
 }));
+vi.mock('../services/filesystemAnalysis', () => ({
+  parseFilesystemAnalysisStdout: vi.fn(() => ({ summary: { filesScanned: 1 } })),
+  saveFilesystemSnapshot: vi.fn(() => Promise.resolve({ id: 'snapshot-1' }))
+}));
 
 vi.mock('../db', () => ({
   db: {
@@ -35,6 +39,7 @@ vi.mock('../db/schema', () => ({
   deviceHardware: {},
   deviceNetwork: {},
   deviceMetrics: {},
+  deviceFilesystemSnapshots: {},
   deviceCommands: {},
   enrollmentKeys: {},
   deviceDisks: {},
@@ -66,6 +71,7 @@ vi.mock('../middleware/agentAuth', () => ({
 }));
 
 import { db } from '../db';
+import { saveFilesystemSnapshot } from '../services/filesystemAnalysis';
 
 describe('agent routes', () => {
   let app: Hono;
@@ -250,6 +256,95 @@ describe('agent routes', () => {
 
       expect(res.status).toBe(404);
     });
+
+    it('queues a threshold filesystem scan when disk usage is high', async () => {
+      vi.mocked(db.select)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([{
+                id: 'device-123',
+                agentId: 'agent-123',
+                orgId: 'org-123',
+                osType: 'windows'
+              }])
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              orderBy: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue([])
+              })
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              orderBy: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue([])
+              })
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              orderBy: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue([{
+                  id: 'cmd-filesystem-1',
+                  type: 'filesystem_analysis',
+                  payload: { path: 'C:\\', trigger: 'threshold' }
+                }])
+              })
+            })
+          })
+        } as any);
+
+      const insertValues = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(db.insert).mockReturnValue({
+        values: insertValues
+      } as any);
+
+      vi.mocked(db.update).mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue(undefined)
+        })
+      } as any);
+
+      const res = await app.request('/agents/agent-123/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metrics: {
+            cpuPercent: 20,
+            ramPercent: 30,
+            ramUsedMb: 2048,
+            diskPercent: 92,
+            diskUsedGb: 200
+          },
+          status: 'warning',
+          agentVersion: '2.0'
+        })
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.commands).toHaveLength(1);
+      expect(body.commands[0].type).toBe('filesystem_analysis');
+      expect(insertValues).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'filesystem_analysis',
+          status: 'pending',
+          payload: expect.objectContaining({
+            trigger: 'threshold',
+            path: 'C:\\'
+          })
+        })
+      );
+    });
   });
 
   describe('POST /agents/:id/commands/:commandId/result', () => {
@@ -306,6 +401,46 @@ describe('agent routes', () => {
       });
 
       expect(res.status).toBe(404);
+    });
+
+    it('persists threshold filesystem analysis command results', async () => {
+      vi.mocked(db.select).mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockReturnValue({
+            limit: vi.fn().mockResolvedValue([{
+              id: 'cmd-fs-1',
+              type: 'filesystem_analysis',
+              payload: { trigger: 'threshold' },
+              deviceId: 'device-123',
+              createdAt: new Date()
+            }])
+          })
+        })
+      } as any);
+
+      vi.mocked(db.update).mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue(undefined)
+        })
+      } as any);
+
+      const res = await app.request('/agents/agent-123/commands/cmd-fs-1/result', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'completed',
+          exitCode: 0,
+          stdout: '{"summary":{"filesScanned":10}}',
+          durationMs: 800
+        })
+      });
+
+      expect(res.status).toBe(200);
+      expect(saveFilesystemSnapshot).toHaveBeenCalledWith(
+        'device-123',
+        'threshold',
+        expect.any(Object)
+      );
     });
   });
 

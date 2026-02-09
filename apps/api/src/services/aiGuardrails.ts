@@ -36,7 +36,8 @@ const TIER2_ACTIONS: Record<string, string[]> = {
 const TIER3_ACTIONS: Record<string, string[]> = {
   file_operations: ['write', 'delete', 'mkdir', 'rename'],
   manage_services: ['start', 'stop', 'restart'],
-  security_scan: ['quarantine', 'remove', 'restore']
+  security_scan: ['quarantine', 'remove', 'restore'],
+  disk_cleanup: ['execute']
 };
 
 // RBAC permission map: tool → { resource, action } (or action-based overrides)
@@ -54,6 +55,11 @@ const TOOL_PERMISSIONS: Record<string, { resource: string; action: string } | Re
   },
   manage_services: { resource: 'devices', action: 'execute' },
   security_scan: { resource: 'devices', action: 'execute' },
+  analyze_disk_usage: { resource: 'devices', action: 'read' },
+  disk_cleanup: {
+    preview: { resource: 'devices', action: 'read' },
+    execute: { resource: 'devices', action: 'execute' },
+  },
   file_operations: {
     list: { resource: 'devices', action: 'read' },
     read: { resource: 'devices', action: 'read' },
@@ -76,6 +82,8 @@ const TOOL_RATE_LIMITS: Record<string, { limit: number; windowSeconds: number }>
   create_automation: { limit: 5, windowSeconds: 600 },
   file_operations: { limit: 20, windowSeconds: 300 },
   manage_services: { limit: 10, windowSeconds: 300 },
+  analyze_disk_usage: { limit: 10, windowSeconds: 300 },
+  disk_cleanup: { limit: 3, windowSeconds: 600 },
 };
 
 export interface GuardrailCheck {

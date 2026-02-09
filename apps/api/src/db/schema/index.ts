@@ -31,3 +31,4 @@ export * from './agentVersions';
 export * from './eventLogs';
 export * from './ai';
 export * from './monitors';
+export * from './filesystem';

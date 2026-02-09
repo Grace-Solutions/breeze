@@ -57,12 +57,13 @@ var handlerRegistry = map[string]CommandHandler{
 	tools.CmdCollectSoftware: handleCollectSoftware,
 
 	// File operations
-	tools.CmdFileList:   handleFileList,
-	tools.CmdFileRead:   handleFileRead,
-	tools.CmdFileWrite:  handleFileWrite,
-	tools.CmdFileDelete: handleFileDelete,
-	tools.CmdFileMkdir:  handleFileMkdir,
-	tools.CmdFileRename: handleFileRename,
+	tools.CmdFileList:           handleFileList,
+	tools.CmdFileRead:           handleFileRead,
+	tools.CmdFileWrite:          handleFileWrite,
+	tools.CmdFileDelete:         handleFileDelete,
+	tools.CmdFileMkdir:          handleFileMkdir,
+	tools.CmdFileRename:         handleFileRename,
+	tools.CmdFilesystemAnalysis: handleFilesystemAnalysis,
 
 	// Terminal commands
 	tools.CmdTerminalStart:  handleTerminalStart,
@@ -233,6 +234,10 @@ func handleFileMkdir(_ *Heartbeat, cmd Command) tools.CommandResult {
 
 func handleFileRename(_ *Heartbeat, cmd Command) tools.CommandResult {
 	return tools.RenameFile(cmd.Payload)
+}
+
+func handleFilesystemAnalysis(_ *Heartbeat, cmd Command) tools.CommandResult {
+	return tools.AnalyzeFilesystem(cmd.Payload)
 }
 
 func handleTerminalStart(h *Heartbeat, cmd Command) tools.CommandResult {

@@ -3,6 +3,7 @@ import {
   Monitor,
   Cpu,
   MemoryStick,
+  HardDrive,
   Clock,
   AlertTriangle,
   Terminal,
@@ -28,6 +29,7 @@ import DevicePerformanceGraphs from './DevicePerformanceGraphs';
 import DeviceEventLogViewer from './DeviceEventLogViewer';
 import DeviceLogsTab from './DeviceLogsTab';
 import DeviceNetworkConnections from './DeviceNetworkConnections';
+import DeviceFilesystemTab from './DeviceFilesystemTab';
 
 type Tab =
   | 'overview'
@@ -41,7 +43,8 @@ type Tab =
   | 'performance'
   | 'eventlog'
   | 'activities'
-  | 'connections';
+  | 'connections'
+  | 'filesystem';
 
 type DeviceDetailsProps = {
   device: Device;
@@ -97,6 +100,7 @@ export default function DeviceDetails({ device, timezone, onBack, onAction }: De
     { id: 'hardware', label: 'Hardware Inventory', icon: <Cpu className="h-4 w-4" /> },
     { id: 'software', label: 'Software Inventory', icon: <Package className="h-4 w-4" /> },
     { id: 'patches', label: 'Patch Status', icon: <CheckCircle className="h-4 w-4" /> },
+    { id: 'filesystem', label: 'Disk Cleanup', icon: <HardDrive className="h-4 w-4" /> },
     { id: 'security', label: 'Security', icon: <Shield className="h-4 w-4" /> },
     { id: 'alerts', label: 'Alert History', icon: <AlertTriangle className="h-4 w-4" /> },
     { id: 'scripts', label: 'Script History', icon: <Terminal className="h-4 w-4" /> },
@@ -200,6 +204,20 @@ export default function DeviceDetails({ device, timezone, onBack, onAction }: De
 
       {activeTab === 'patches' && (
         <DevicePatchStatusTab deviceId={device.id} timezone={effectiveTimezone} osType={device.os} />
+      )}
+
+      {activeTab === 'filesystem' && (
+        <DeviceFilesystemTab
+          deviceId={device.id}
+          osType={device.os}
+          onOpenFiles={() => {
+            if (onAction) {
+              onAction('files', device);
+              return;
+            }
+            window.location.href = `/remote/files/${device.id}`;
+          }}
+        />
       )}
 
       {activeTab === 'security' && (

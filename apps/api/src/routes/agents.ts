@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, sql } from 'drizzle-orm';
 import { db } from '../db';
 import {
   devices,
@@ -20,11 +20,13 @@ import {
   deviceEventLogs,
   securityStatus,
   securityThreats,
-  securityScans
+  securityScans,
+  deviceFilesystemSnapshots
 } from '../db/schema';
 import { createHash, randomBytes } from 'crypto';
 import { agentAuthMiddleware } from '../middleware/agentAuth';
 import { writeAuditEvent } from '../services/auditEvents';
+import { parseFilesystemAnalysisStdout, saveFilesystemSnapshot } from '../services/filesystemAnalysis';
 
 export const agentRoutes = new Hono();
 
@@ -157,6 +159,102 @@ const securityCommandTypes = {
   remove: 'security_threat_remove',
   restore: 'security_threat_restore'
 } as const;
+
+const filesystemAnalysisCommandType = 'filesystem_analysis';
+const filesystemDiskThresholdPercent = parseEnvBoundedNumber(
+  process.env.FILESYSTEM_ANALYSIS_DISK_THRESHOLD,
+  85,
+  50,
+  100
+);
+const filesystemThresholdCooldownMinutes = parseEnvBoundedNumber(
+  process.env.FILESYSTEM_ANALYSIS_THRESHOLD_COOLDOWN_MINUTES,
+  120,
+  5,
+  1440
+);
+
+function parseEnvBoundedNumber(raw: string | undefined, fallback: number, min: number, max: number): number {
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return fallback;
+  const rounded = Math.round(parsed);
+  if (rounded < min || rounded > max) return fallback;
+  return rounded;
+}
+
+function getFilesystemThresholdScanPath(osType: unknown): string {
+  if (osType === 'windows') return 'C:\\';
+  if (osType === 'macos') return '/Users';
+  return '/home';
+}
+
+async function maybeQueueThresholdFilesystemAnalysis(
+  device: Pick<typeof devices.$inferSelect, 'id' | 'osType'>,
+  diskPercent: number
+): Promise<{ queued: boolean; path?: string; thresholdPercent?: number }> {
+  if (!Number.isFinite(diskPercent) || diskPercent < filesystemDiskThresholdPercent) {
+    return { queued: false };
+  }
+
+  const cooldownStart = new Date(Date.now() - filesystemThresholdCooldownMinutes * 60 * 1000);
+  const [recentSnapshot] = await db
+    .select({ id: deviceFilesystemSnapshots.id })
+    .from(deviceFilesystemSnapshots)
+    .where(
+      and(
+        eq(deviceFilesystemSnapshots.deviceId, device.id),
+        gte(deviceFilesystemSnapshots.capturedAt, cooldownStart)
+      )
+    )
+    .orderBy(desc(deviceFilesystemSnapshots.capturedAt))
+    .limit(1);
+
+  if (recentSnapshot) {
+    return { queued: false };
+  }
+
+  const [recentCommand] = await db
+    .select({ id: deviceCommands.id })
+    .from(deviceCommands)
+    .where(
+      and(
+        eq(deviceCommands.deviceId, device.id),
+        eq(deviceCommands.type, filesystemAnalysisCommandType),
+        gte(deviceCommands.createdAt, cooldownStart)
+      )
+    )
+    .orderBy(desc(deviceCommands.createdAt))
+    .limit(1);
+
+  if (recentCommand) {
+    return { queued: false };
+  }
+
+  const path = getFilesystemThresholdScanPath(device.osType);
+  await db.insert(deviceCommands).values({
+    deviceId: device.id,
+    type: filesystemAnalysisCommandType,
+    payload: {
+      path,
+      trigger: 'threshold',
+      thresholdPercent: filesystemDiskThresholdPercent,
+      maxDepth: 6,
+      topFiles: 50,
+      topDirs: 30,
+      maxEntries: 200000,
+      timeoutSeconds: 20,
+      followSymlinks: false,
+    },
+    status: 'pending',
+  });
+
+  return {
+    queued: true,
+    path,
+    thresholdPercent: filesystemDiskThresholdPercent,
+  };
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -472,6 +570,28 @@ async function handleSecurityCommandResult(
   }
 }
 
+async function handleFilesystemAnalysisCommandResult(
+  command: typeof deviceCommands.$inferSelect,
+  resultData: z.infer<typeof commandResultSchema>
+): Promise<void> {
+  if (resultData.status !== 'completed') {
+    return;
+  }
+
+  const payload = isObject(command.payload) ? command.payload : {};
+  const trigger = asString(payload.trigger);
+  if (trigger !== 'threshold') {
+    return;
+  }
+
+  const parsed = parseFilesystemAnalysisStdout(resultData.stdout ?? '');
+  if (Object.keys(parsed).length === 0) {
+    return;
+  }
+
+  await saveFilesystemSnapshot(command.deviceId, 'threshold', parsed);
+}
+
 // Generate a unique agent ID
 function generateAgentId(): string {
   return randomBytes(32).toString('hex');
@@ -716,6 +836,30 @@ agentRoutes.post('/:id/heartbeat', zValidator('json', heartbeatSchema), async (c
       processCount: data.metrics.processCount
     });
 
+  try {
+    const thresholdScan = await maybeQueueThresholdFilesystemAnalysis(
+      { id: device.id, osType: device.osType },
+      data.metrics.diskPercent
+    );
+    if (thresholdScan.queued) {
+      writeAuditEvent(c, {
+        orgId: device.orgId,
+        actorType: 'agent',
+        actorId: agentId,
+        action: 'agent.filesystem.threshold_scan.queued',
+        resourceType: 'device',
+        resourceId: device.id,
+        details: {
+          diskPercent: data.metrics.diskPercent,
+          thresholdPercent: thresholdScan.thresholdPercent,
+          path: thresholdScan.path,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`[agents] failed to queue threshold filesystem scan for ${device.id}:`, err);
+  }
+
   // Get pending commands
   const commands = await db
     .select()
@@ -837,6 +981,14 @@ agentRoutes.post(
         await handleSecurityCommandResult(command, data);
       } catch (err) {
         console.error(`[agents] security command post-processing failed for ${commandId}:`, err);
+      }
+    }
+
+    if (command.type === filesystemAnalysisCommandType) {
+      try {
+        await handleFilesystemAnalysisCommandResult(command, data);
+      } catch (err) {
+        console.error(`[agents] filesystem analysis post-processing failed for ${commandId}:`, err);
       }
     }
 

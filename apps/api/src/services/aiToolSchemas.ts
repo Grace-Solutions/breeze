@@ -59,6 +59,14 @@ const safePath = z.string().max(4096).refine(
   { message: 'Access to this path is blocked' }
 );
 
+const cleanupPath = z.string().max(4096).refine(
+  (path) => !path.includes('\0'),
+  { message: 'Path contains null bytes' }
+).refine(
+  (path) => !path.includes('..'),
+  { message: 'Path traversal (..) not allowed' }
+);
+
 // Tool schemas
 export const toolInputSchemas: Record<string, z.ZodType> = {
   query_devices: z.object({
@@ -151,6 +159,27 @@ export const toolInputSchemas: Record<string, z.ZodType> = {
     content: z.string().max(1_000_000).optional(),
     newPath: safePath.optional(),
   }),
+
+  analyze_disk_usage: z.object({
+    deviceId: uuid,
+    refresh: z.boolean().optional(),
+    path: safePath.optional(),
+    maxDepth: z.number().int().min(1).max(12).optional(),
+    topFiles: z.number().int().min(1).max(500).optional(),
+    topDirs: z.number().int().min(1).max(200).optional(),
+    maxEntries: z.number().int().min(1_000).max(1_000_000).optional(),
+    timeoutSeconds: z.number().int().min(5).max(120).optional(),
+  }),
+
+  disk_cleanup: z.object({
+    deviceId: uuid,
+    action: z.enum(['preview', 'execute']),
+    categories: z.array(z.enum(['temp_files', 'browser_cache', 'package_cache', 'trash'])).max(10).optional(),
+    paths: z.array(cleanupPath).min(1).max(200).optional(),
+  }).refine(
+    (data) => data.action === 'preview' || (data.action === 'execute' && Array.isArray(data.paths) && data.paths.length > 0),
+    { message: 'paths are required for execute action' }
+  ),
 
   query_audit_log: z.object({
     action: z.string().max(100).optional(),

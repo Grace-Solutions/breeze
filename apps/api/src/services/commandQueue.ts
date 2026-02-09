@@ -46,6 +46,7 @@ export const CommandTypes = {
   FILE_DELETE: 'file_delete',
   FILE_MKDIR: 'file_mkdir',
   FILE_RENAME: 'file_rename',
+  FILESYSTEM_ANALYSIS: 'filesystem_analysis',
 
   // Terminal
   TERMINAL_START: 'terminal_start',

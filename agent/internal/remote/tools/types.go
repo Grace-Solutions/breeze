@@ -93,12 +93,13 @@ const (
 	CmdSecurityThreatRestore    = "security_threat_restore"
 
 	// File operations
-	CmdFileList   = "file_list"
-	CmdFileRead   = "file_read"
-	CmdFileWrite  = "file_write"
-	CmdFileDelete = "file_delete"
-	CmdFileMkdir  = "file_mkdir"
-	CmdFileRename = "file_rename"
+	CmdFileList           = "file_list"
+	CmdFileRead           = "file_read"
+	CmdFileWrite          = "file_write"
+	CmdFileDelete         = "file_delete"
+	CmdFileMkdir          = "file_mkdir"
+	CmdFileRename         = "file_rename"
+	CmdFilesystemAnalysis = "filesystem_analysis"
 
 	// Network discovery
 	CmdNetworkDiscovery = "network_discovery"
@@ -313,6 +314,101 @@ type FileEntry struct {
 type FileListResponse struct {
 	Path    string      `json:"path"`
 	Entries []FileEntry `json:"entries"`
+}
+
+// FilesystemLargestFile captures one large file candidate.
+type FilesystemLargestFile struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	ModifiedAt string `json:"modifiedAt,omitempty"`
+	Owner      string `json:"owner,omitempty"`
+}
+
+// FilesystemLargestDirectory captures one large directory candidate.
+type FilesystemLargestDirectory struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"sizeBytes"`
+	FileCount int64  `json:"fileCount"`
+}
+
+// FilesystemAccumulation captures grouped byte totals for cleanup categories.
+type FilesystemAccumulation struct {
+	Category string `json:"category"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// FilesystemOldDownload captures a stale download candidate.
+type FilesystemOldDownload struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	ModifiedAt string `json:"modifiedAt,omitempty"`
+	Owner      string `json:"owner,omitempty"`
+}
+
+// FilesystemUnrotatedLog captures large log files that look unrotated.
+type FilesystemUnrotatedLog struct {
+	Path       string `json:"path"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	ModifiedAt string `json:"modifiedAt,omitempty"`
+}
+
+// FilesystemTrashUsage captures trash/recycle bin usage.
+type FilesystemTrashUsage struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+// FilesystemDuplicateCandidate captures a duplicate group candidate.
+type FilesystemDuplicateCandidate struct {
+	Key       string   `json:"key"`
+	SizeBytes int64    `json:"sizeBytes"`
+	Count     int      `json:"count"`
+	Paths     []string `json:"paths"`
+}
+
+// FilesystemCleanupCandidate captures a safe cleanup candidate.
+type FilesystemCleanupCandidate struct {
+	Path       string `json:"path"`
+	Category   string `json:"category"`
+	SizeBytes  int64  `json:"sizeBytes"`
+	Safe       bool   `json:"safe"`
+	Reason     string `json:"reason,omitempty"`
+	ModifiedAt string `json:"modifiedAt,omitempty"`
+}
+
+// FilesystemScanError captures per-path scan errors.
+type FilesystemScanError struct {
+	Path  string `json:"path"`
+	Error string `json:"error"`
+}
+
+// FilesystemAnalysisSummary captures high-level scan stats.
+type FilesystemAnalysisSummary struct {
+	FilesScanned          int64 `json:"filesScanned"`
+	DirsScanned           int64 `json:"dirsScanned"`
+	BytesScanned          int64 `json:"bytesScanned"`
+	MaxDepthReached       int   `json:"maxDepthReached"`
+	PermissionDeniedCount int64 `json:"permissionDeniedCount"`
+}
+
+// FilesystemAnalysisResponse captures the full analysis payload.
+type FilesystemAnalysisResponse struct {
+	Path                string                         `json:"path"`
+	StartedAt           string                         `json:"startedAt"`
+	CompletedAt         string                         `json:"completedAt"`
+	DurationMs          int64                          `json:"durationMs"`
+	Partial             bool                           `json:"partial"`
+	Reason              string                         `json:"reason,omitempty"`
+	Summary             FilesystemAnalysisSummary      `json:"summary"`
+	TopLargestFiles     []FilesystemLargestFile        `json:"topLargestFiles"`
+	TopLargestDirs      []FilesystemLargestDirectory   `json:"topLargestDirectories"`
+	TempAccumulation    []FilesystemAccumulation       `json:"tempAccumulation"`
+	OldDownloads        []FilesystemOldDownload        `json:"oldDownloads"`
+	UnrotatedLogs       []FilesystemUnrotatedLog       `json:"unrotatedLogs"`
+	TrashUsage          []FilesystemTrashUsage         `json:"trashUsage"`
+	DuplicateCandidates []FilesystemDuplicateCandidate `json:"duplicateCandidates"`
+	CleanupCandidates   []FilesystemCleanupCandidate   `json:"cleanupCandidates"`
+	Errors              []FilesystemScanError          `json:"errors"`
 }
 
 // RequirePayloadString extracts a required string field from the payload.

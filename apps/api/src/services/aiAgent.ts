@@ -807,6 +807,7 @@ function buildSystemPrompt(auth: AuthContext, pageContext?: AiPageContext): stri
 - Run scripts on devices
 - Manage system services
 - Perform security scans and threat management
+- Analyze disk usage and run approval-gated cleanup
 - Query audit logs for investigation
 - Create automations
 - Perform network discovery
