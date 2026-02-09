@@ -22,7 +22,7 @@ export default function DesktopViewer({ params, onDisconnect, onError }: Props) 
   const [transport, setTransport] = useState<Transport | null>(null);
   const [fps, setFps] = useState(0);
   const [quality, setQuality] = useState(60);
-  const [scale, setScale] = useState(0.5);
+  const [scale, setScale] = useState(1.0);
   const [maxFps, setMaxFps] = useState(15);
   const [bitrate, setBitrate] = useState(2500);
   const [hostname, setHostname] = useState('');
@@ -94,6 +94,8 @@ export default function DesktopViewer({ params, onDisconnect, onError }: Props) 
             setHostname(msg.device?.hostname || 'Unknown');
             setConnectedAt(new Date());
             setErrorMessage(null);
+            // Auto-focus the canvas so keyboard events are captured immediately
+            canvasRef.current?.focus();
             break;
           case 'pong':
             break;
@@ -235,8 +237,7 @@ export default function DesktopViewer({ params, onDisconnect, onError }: Props) 
     });
   }, []);
 
-  // ── Input: coordinate scaling ──────────────────────────────────────
-
+  // Map browser pixel coordinates to remote screen coordinates.
   const scaleCoordsFn = useCallback((clientX: number, clientY: number) => {
     if (transport === 'webrtc') {
       const videoEl = videoRef.current;
@@ -253,10 +254,10 @@ export default function DesktopViewer({ params, onDisconnect, onError }: Props) 
     const scaleY = canvas.height / rect.height;
 
     return {
-      x: Math.round((clientX - rect.left) * scaleX),
-      y: Math.round((clientY - rect.top) * scaleY),
+      x: Math.round((clientX - rect.left) * scaleX / scale),
+      y: Math.round((clientY - rect.top) * scaleY / scale),
     };
-  }, [transport]);
+  }, [scale, transport]);
 
   // ── Input: send event ──────────────────────────────────────────────
 
