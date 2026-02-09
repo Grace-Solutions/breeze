@@ -59,9 +59,23 @@ patchesRoutes.get(
       .where(eq(devicePatches.deviceId, deviceId))
       .orderBy(desc(devicePatches.lastCheckedAt));
 
-    // Separate into pending and installed
+    // Separate actionable pending updates from stale missing records.
     const pending = devicePatchList
-      .filter(p => p.status === 'pending' || p.status === 'missing')
+      .filter(p => p.status === 'pending')
+      .map(p => ({
+        id: p.patchId,
+        name: p.title,
+        title: p.title,
+        severity: p.severity,
+        status: p.status,
+        releaseDate: p.releaseDate,
+        category: p.category,
+        source: p.source,
+        requiresReboot: p.requiresReboot
+      }));
+
+    const missing = devicePatchList
+      .filter(p => p.status === 'missing')
       .map(p => ({
         id: p.patchId,
         name: p.title,
@@ -108,6 +122,7 @@ patchesRoutes.get(
       data: {
         compliancePercent,
         pending,
+        missing,
         installed,
         failed,
         patches: devicePatchList.map(p => ({

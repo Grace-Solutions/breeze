@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   Folder,
   File,
@@ -147,7 +147,74 @@ function formatSize(bytes?: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
+
+function normalizeHierarchyPath(path: string): string {
+  let normalized = path.trim().replace(/\\/g, '/');
+  while (normalized.includes('//')) normalized = normalized.replaceAll('//', '/');
+  if (normalized.length > 1 && normalized.endsWith('/')) {
+    const isWindowsDriveRoot = normalized.length === 3 && normalized[1] === ':' && normalized[2] === '/';
+    if (!isWindowsDriveRoot) {
+      normalized = normalized.slice(0, -1);
+    }
+  }
+  return normalized.toLowerCase();
+}
+
+function isDescendantPath(path: string, ancestor: string): boolean {
+  const normalizedPath = normalizeHierarchyPath(path);
+  const normalizedAncestor = normalizeHierarchyPath(ancestor);
+  if (!normalizedPath || !normalizedAncestor || normalizedPath === normalizedAncestor) return false;
+  if (normalizedAncestor === '/') return normalizedPath.startsWith('/') && normalizedPath !== '/';
+  if (normalizedAncestor.length === 3 && normalizedAncestor[1] === ':' && normalizedAncestor[2] === '/') {
+    return normalizedPath.startsWith(normalizedAncestor) && normalizedPath !== normalizedAncestor;
+  }
+  return normalizedPath.startsWith(`${normalizedAncestor}/`);
+}
+
+function collapseAncestorDirectories<T extends { path: string; sizeBytes: number }>(
+  directories: T[],
+  limit: number,
+  descendantRatio = 0.70
+): T[] {
+  if (limit <= 0 || directories.length === 0) return [];
+  const items = directories
+    .slice()
+    .sort((a, b) => b.sizeBytes - a.sizeBytes);
+
+  const pruned = new Set<number>();
+  for (let i = 0; i < items.length; i += 1) {
+    if (pruned.has(i)) continue;
+    const ancestorPath = items[i].path;
+    const ancestorBytes = items[i].sizeBytes;
+    if (!ancestorPath || ancestorBytes <= 0) continue;
+
+    for (let j = 0; j < items.length; j += 1) {
+      if (i === j || pruned.has(j)) continue;
+      const childPath = items[j].path;
+      const childBytes = items[j].sizeBytes;
+      if (!childPath || childBytes <= 0) continue;
+      if (!isDescendantPath(childPath, ancestorPath)) continue;
+      const ancestorEstimated = Boolean((items[i] as { estimated?: boolean }).estimated);
+      const childEstimated = Boolean((items[j] as { estimated?: boolean }).estimated);
+      let effectiveRatio = descendantRatio;
+      if (ancestorEstimated && !childEstimated) {
+        effectiveRatio = Math.min(effectiveRatio, 0.45);
+      } else if (ancestorEstimated && childEstimated) {
+        effectiveRatio = Math.min(effectiveRatio, 0.60);
+      } else if (!ancestorEstimated && childEstimated) {
+        effectiveRatio = Math.max(effectiveRatio, 0.85);
+      }
+      if (childBytes >= ancestorBytes * effectiveRatio) {
+        pruned.add(i);
+        break;
+      }
+    }
+  }
+
+  return items.filter((_, index) => !pruned.has(index)).slice(0, limit);
 }
 
 // Format date
@@ -188,6 +255,10 @@ export default function FileManager({
   const [selectedCleanupPaths, setSelectedCleanupPaths] = useState<Set<string>>(new Set());
   const [cleanupResult, setCleanupResult] = useState<DiskCleanupResult | null>(null);
   const [scanCommand, setScanCommand] = useState<{ id: string; status: string } | null>(null);
+  const collapsedTopDirectories = useMemo(
+    () => collapseAncestorDirectories(diskSnapshot?.topLargestDirectories ?? [], 5),
+    [diskSnapshot?.topLargestDirectories]
+  );
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -557,7 +628,7 @@ export default function FileManager({
           maxDepth: 32,
           topFiles: 50,
           topDirs: 30,
-          maxEntries: 2000000,
+          maxEntries: 10000000,
           workers: 6,
           timeoutSeconds
         })
@@ -855,7 +926,7 @@ export default function FileManager({
                   {diskSnapshot.topLargestFiles.slice(0, 5).map((file) => (
                     <div key={file.path} className="flex items-center justify-between gap-2 text-xs">
                       <span className="truncate">{file.path}</span>
-                      <span className="font-medium">{formatSize(file.sizeBytes)}</span>
+                      <span className="shrink-0 whitespace-nowrap text-right font-medium tabular-nums">{formatSize(file.sizeBytes)}</span>
                     </div>
                   ))}
                 </div>
@@ -866,10 +937,10 @@ export default function FileManager({
                   <p className="mt-1 text-[11px] text-muted-foreground">{'>='} indicates lower-bound size.</p>
                 )}
                 <div className="mt-1 space-y-1">
-                  {diskSnapshot.topLargestDirectories.slice(0, 5).map((dir) => (
+                  {collapsedTopDirectories.map((dir) => (
                     <div key={dir.path} className="flex items-center justify-between gap-2 text-xs">
                       <span className="truncate">{dir.path}</span>
-                      <span className="font-medium">{dir.estimated ? '>=' : ''}{formatSize(dir.sizeBytes)}</span>
+                      <span className="shrink-0 whitespace-nowrap text-right font-medium tabular-nums">{dir.estimated ? '>=' : ''}{formatSize(dir.sizeBytes)}</span>
                     </div>
                   ))}
                 </div>

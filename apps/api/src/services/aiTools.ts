@@ -669,7 +669,7 @@ registerTool({
         maxDepth: { type: 'number', description: 'Max traversal depth (1-64)' },
         topFiles: { type: 'number', description: 'Largest file rows to keep (1-500)' },
         topDirs: { type: 'number', description: 'Largest directory rows to keep (1-200)' },
-        maxEntries: { type: 'number', description: 'Hard traversal cap (1k-5M)' },
+        maxEntries: { type: 'number', description: 'Hard traversal cap (1k-25M)' },
         workers: { type: 'number', description: 'Parallel directory workers (1-32)' },
         timeoutSeconds: { type: 'number', description: 'Scan timeout in seconds (5-900)' }
       },
@@ -686,6 +686,7 @@ registerTool({
       ? 'C:\\'
       : '/';
     const scanPath = typeof input.path === 'string' && input.path.length > 0 ? input.path : defaultPath;
+    const isRootScopedScan = scanPath === defaultPath;
 
     let snapshot = await getLatestFilesystemSnapshot(deviceId);
 
@@ -701,6 +702,8 @@ registerTool({
         maxEntries: input.maxEntries,
         workers: input.workers,
         timeoutSeconds: input.timeoutSeconds,
+        autoContinue: isRootScopedScan,
+        resumeAttempt: 0,
       }, { userId: auth.user.id, timeoutMs, preferHeartbeat: true });
 
       if (commandResult.status !== 'completed') {

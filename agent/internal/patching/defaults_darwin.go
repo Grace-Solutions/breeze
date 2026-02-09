@@ -15,7 +15,7 @@ func NewDefaultManager(_ *config.Config) *PatchManager {
 	if _, err := exec.LookPath("softwareupdate"); err == nil {
 		providers = append(providers, NewAppleSoftwareUpdateProvider())
 	}
-	if _, err := exec.LookPath("brew"); err == nil {
+	if _, err := brewBinaryPath(); err == nil {
 		providers = append(providers, NewHomebrewProvider())
 	}
 

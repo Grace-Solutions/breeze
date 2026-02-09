@@ -7,7 +7,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 )
 
@@ -31,9 +34,119 @@ func (h *HomebrewProvider) Name() string {
 	return "Homebrew"
 }
 
+func brewBinaryPath() (string, error) {
+	if path, err := exec.LookPath("brew"); err == nil {
+		return path, nil
+	}
+
+	for _, candidate := range []string{
+		"/opt/homebrew/bin/brew",
+		"/usr/local/bin/brew",
+	} {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("brew binary not found")
+}
+
+func activeConsoleUser() (*user.User, error) {
+	output, err := exec.Command("/usr/bin/stat", "-f", "%Su", "/dev/console").Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve console user: %w", err)
+	}
+
+	username := strings.TrimSpace(string(output))
+	if username == "" || username == "root" || username == "loginwindow" {
+		return nil, fmt.Errorf("no active non-root console user")
+	}
+
+	account, err := user.Lookup(username)
+	if err != nil {
+		return nil, fmt.Errorf("lookup console user %q: %w", username, err)
+	}
+
+	return account, nil
+}
+
+func setEnv(env []string, key string, value string) []string {
+	prefix := key + "="
+	for i := range env {
+		if strings.HasPrefix(env[i], prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func ensurePathPrefix(pathValue string, dir string) string {
+	if dir == "" {
+		return pathValue
+	}
+
+	for _, entry := range strings.Split(pathValue, ":") {
+		if entry == dir {
+			return pathValue
+		}
+	}
+
+	if pathValue == "" {
+		return dir
+	}
+
+	return dir + ":" + pathValue
+}
+
+func brewEnv(brewPath string, homeDir string) []string {
+	env := os.Environ()
+
+	if homeDir != "" {
+		env = setEnv(env, "HOME", homeDir)
+	}
+
+	brewDir := filepath.Dir(brewPath)
+	pathValue := os.Getenv("PATH")
+	env = setEnv(env, "PATH", ensurePathPrefix(pathValue, brewDir))
+
+	return env
+}
+
+func (h *HomebrewProvider) brewCommand(args ...string) (*exec.Cmd, error) {
+	brewPath, err := brewBinaryPath()
+	if err != nil {
+		return nil, err
+	}
+
+	// Homebrew intentionally rejects running as root. If agent is elevated,
+	// re-run brew as the active console user.
+	if os.Geteuid() == 0 {
+		account, err := activeConsoleUser()
+		if err != nil {
+			return nil, fmt.Errorf("cannot execute brew as root: %w", err)
+		}
+
+		sudoArgs := append([]string{"-n", "-H", "-u", account.Username, brewPath}, args...)
+		cmd := exec.Command("/usr/bin/sudo", sudoArgs...)
+		cmd.Env = brewEnv(brewPath, account.HomeDir)
+		return cmd, nil
+	}
+
+	cmd := exec.Command(brewPath, args...)
+	cmd.Env = brewEnv(brewPath, "")
+	return cmd, nil
+}
+
 // Scan returns available upgrades using brew.
 func (h *HomebrewProvider) Scan() ([]AvailablePatch, error) {
-	output, err := exec.Command("brew", "outdated", "--json=v2").Output()
+	cmd, err := h.brewCommand("outdated", "--json=v2")
+	if err != nil {
+		return nil, err
+	}
+
+	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("brew outdated failed: %w", err)
 	}
@@ -74,7 +187,12 @@ func (h *HomebrewProvider) Install(patchID string) (InstallResult, error) {
 	}
 	args = append(args, name)
 
-	output, err := exec.Command("brew", args...).CombinedOutput()
+	cmd, err := h.brewCommand(args...)
+	if err != nil {
+		return InstallResult{}, err
+	}
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("brew upgrade failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -94,7 +212,12 @@ func (h *HomebrewProvider) Uninstall(patchID string) error {
 	}
 	args = append(args, name)
 
-	output, err := exec.Command("brew", args...).CombinedOutput()
+	cmd, err := h.brewCommand(args...)
+	if err != nil {
+		return err
+	}
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("brew uninstall failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -104,12 +227,12 @@ func (h *HomebrewProvider) Uninstall(patchID string) error {
 
 // GetInstalled returns installed Homebrew formulae and casks.
 func (h *HomebrewProvider) GetInstalled() ([]InstalledPatch, error) {
-	formulae, err := brewList("brew", []string{"list", "--versions"})
+	formulae, err := h.brewList("--versions")
 	if err != nil {
 		return nil, err
 	}
 
-	casks, err := brewList("brew", []string{"list", "--cask", "--versions"})
+	casks, err := h.brewList("--cask", "--versions")
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +279,17 @@ func parseBrewID(patchID string) (string, bool) {
 	return patchID, false
 }
 
-func brewList(command string, args []string) ([]InstalledPatch, error) {
-	output, err := exec.Command(command, args...).Output()
+func (h *HomebrewProvider) brewList(args ...string) ([]InstalledPatch, error) {
+	brewArgs := append([]string{"list"}, args...)
+
+	cmd, err := h.brewCommand(brewArgs...)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s failed: %w", command, strings.Join(args, " "), err)
+		return nil, err
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("brew %s failed: %w", strings.Join(brewArgs, " "), err)
 	}
 
 	scanner := bufio.NewScanner(bytes.NewReader(output))
@@ -176,7 +306,7 @@ func brewList(command string, args []string) ([]InstalledPatch, error) {
 		name := parts[0]
 		version := parts[1]
 		id := name
-		if strings.Contains(strings.Join(args, " "), "--cask") {
+		if strings.Contains(strings.Join(brewArgs, " "), "--cask") {
 			id = brewCaskPrefix + name
 		}
 

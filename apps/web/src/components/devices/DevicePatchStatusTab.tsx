@@ -7,6 +7,8 @@ import {
   ExternalLink,
   Monitor,
   Server,
+  Loader2,
+  RefreshCw,
   type LucideIcon
 } from 'lucide-react';
 import { fetchWithAuth } from '../../stores/auth';
@@ -31,11 +33,23 @@ type PatchPayload = {
   compliance?: number;
   pending?: PatchItem[];
   pendingPatches?: PatchItem[];
+  missing?: PatchItem[];
+  missingPatches?: PatchItem[];
   available?: PatchItem[];
   installed?: PatchItem[];
   installedPatches?: PatchItem[];
   applied?: PatchItem[];
   patches?: PatchItem[];
+};
+
+type PatchScanResponse = {
+  jobId?: string;
+  queuedCommandIds?: string[];
+};
+
+type PatchInstallResponse = {
+  commandId?: string;
+  patchCount?: number;
 };
 
 type DevicePatchStatusTabProps = {
@@ -118,6 +132,28 @@ function getPatchDisplayCopy(osType: OSType): PatchDisplayCopy {
         installedThirdPartyTitle: 'Installed Third-Party Updates'
       };
   }
+}
+
+function getNativePatchSource(osType: OSType): 'microsoft' | 'apple' | 'linux' {
+  if (osType === 'windows') return 'microsoft';
+  if (osType === 'linux') return 'linux';
+  return 'apple';
+}
+
+function getNativePatchProviderLabel(osType: OSType): string {
+  if (osType === 'windows') return 'Windows';
+  if (osType === 'linux') return 'Linux';
+  return 'Apple';
+}
+
+function readPatchIds(patches: PatchItem[]): string[] {
+  const unique = new Set<string>();
+  for (const patch of patches) {
+    if (typeof patch.id === 'string' && patch.id.length > 0) {
+      unique.add(patch.id);
+    }
+  }
+  return [...unique];
 }
 
 function getCategoryBadge(patch: PatchItem, osType: OSType) {
@@ -263,6 +299,10 @@ export default function DevicePatchStatusTab({ deviceId, timezone, osType }: Dev
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [siteTimezone, setSiteTimezone] = useState<string | undefined>(timezone);
+  const [controlAction, setControlAction] = useState<
+    'install-native' | 'scan-native' | 'scan-third-party' | 'install-third-party' | null
+  >(null);
+  const [controlNotice, setControlNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
 
   // Use provided timezone, fetched siteTimezone, or browser default
   const effectiveTimezone = timezone ?? siteTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -293,16 +333,22 @@ export default function DevicePatchStatusTab({ deviceId, timezone, osType }: Dev
   const normalizedOsType: OSType = osType ?? 'macos';
   const displayCopy = useMemo(() => getPatchDisplayCopy(normalizedOsType), [normalizedOsType]);
   const NativeIcon = displayCopy.nativeIcon;
+  const nativeSource = useMemo(() => getNativePatchSource(normalizedOsType), [normalizedOsType]);
+  const nativeProviderLabel = useMemo(() => getNativePatchProviderLabel(normalizedOsType), [normalizedOsType]);
 
-  const { pendingNative, pendingOther, installedNative, installedThirdParty, compliancePercent } = useMemo(() => {
+  const { pendingNative, pendingOther, installedNative, installedThirdParty, compliancePercent, missingCount } = useMemo(() => {
     const data = payload ?? {};
     const pendingList = data.pending ?? data.pendingPatches ?? data.available ?? [];
+    const missingList = data.missing ?? data.missingPatches ?? [];
     const installedList = data.installed ?? data.installedPatches ?? data.applied ?? [];
     const patches = data.patches ?? [];
 
     const inferredPending = pendingList.length > 0
       ? pendingList
       : patches.filter(patch => (patch.status || '').toLowerCase() === 'pending' || (patch.status || '').toLowerCase() === 'available');
+    const inferredMissing = missingList.length > 0
+      ? missingList
+      : patches.filter(patch => (patch.status || '').toLowerCase() === 'missing');
     const inferredInstalled = installedList.length > 0
       ? installedList
       : patches.filter(patch => (patch.status || '').toLowerCase() === 'installed');
@@ -321,9 +367,91 @@ export default function DevicePatchStatusTab({ deviceId, timezone, osType }: Dev
       pendingOther: otherPending,
       installedNative: nativeInstalled,
       installedThirdParty: thirdPartyInstalled,
-      compliancePercent: compliance
+      compliancePercent: compliance,
+      missingCount: inferredMissing.length
     };
   }, [payload, normalizedOsType]);
+
+  const nativePendingIds = useMemo(() => readPatchIds(pendingNative), [pendingNative]);
+  const thirdPartyPendingIds = useMemo(() => readPatchIds(pendingOther), [pendingOther]);
+
+  const queuePatchScan = useCallback(async (
+    action: 'scan-native' | 'scan-third-party',
+    source: string,
+    label: string
+  ) => {
+    setControlAction(action);
+    setControlNotice(null);
+    try {
+      const response = await fetchWithAuth('/patches/scan', {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceIds: [deviceId],
+          source
+        })
+      });
+      const body = await response.json().catch(() => ({})) as PatchScanResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error || `Failed to queue ${label.toLowerCase()}`);
+      }
+
+      const queuedCount = Array.isArray(body.queuedCommandIds) ? body.queuedCommandIds.length : 0;
+      const jobSuffix = body.jobId ? ` (job ${body.jobId})` : '';
+      const commandSuffix = queuedCount > 0 ? ` - ${queuedCount} command queued` : '';
+      setControlNotice({
+        kind: 'success',
+        message: `${label} queued${commandSuffix}${jobSuffix}.`
+      });
+    } catch (err) {
+      setControlNotice({
+        kind: 'error',
+        message: err instanceof Error ? err.message : `Failed to queue ${label.toLowerCase()}`
+      });
+    } finally {
+      setControlAction(null);
+    }
+  }, [deviceId]);
+
+  const queuePatchInstall = useCallback(async (
+    action: 'install-native' | 'install-third-party',
+    patchIds: string[],
+    label: string
+  ) => {
+    if (patchIds.length === 0) {
+      setControlNotice({
+        kind: 'error',
+        message: `No pending patches available for ${label.toLowerCase()}.`
+      });
+      return;
+    }
+
+    setControlAction(action);
+    setControlNotice(null);
+    try {
+      const response = await fetchWithAuth(`/devices/${deviceId}/patches/install`, {
+        method: 'POST',
+        body: JSON.stringify({ patchIds })
+      });
+      const body = await response.json().catch(() => ({})) as PatchInstallResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(body.error || `Failed to queue ${label.toLowerCase()}`);
+      }
+
+      const commandSuffix = body.commandId ? ` (command ${body.commandId})` : '';
+      const patchCount = typeof body.patchCount === 'number' ? body.patchCount : patchIds.length;
+      setControlNotice({
+        kind: 'success',
+        message: `${label} queued for ${patchCount} patches${commandSuffix}.`
+      });
+    } catch (err) {
+      setControlNotice({
+        kind: 'error',
+        message: err instanceof Error ? err.message : `Failed to queue ${label.toLowerCase()}`
+      });
+    } finally {
+      setControlAction(null);
+    }
+  }, [deviceId]);
 
   if (loading) {
     return (
@@ -353,6 +481,82 @@ export default function DevicePatchStatusTab({ deviceId, timezone, osType }: Dev
 
   return (
     <div className="space-y-6">
+      <div className="rounded-lg border bg-card p-6 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h3 className="text-lg font-semibold">Patch Controls</h3>
+            <p className="text-sm text-muted-foreground">Queue scans and installs for this device</p>
+          </div>
+          <button
+            type="button"
+            onClick={fetchPatchStatus}
+            disabled={controlAction !== null}
+            className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${controlAction === null ? '' : 'animate-spin'}`} />
+            Refresh patch data
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => queuePatchInstall('install-native', nativePendingIds, `Install pending ${nativeProviderLabel} patches`)}
+            disabled={controlAction !== null || nativePendingIds.length === 0}
+            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {controlAction === 'install-native' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4 text-green-500" />}
+            Install pending OS patches ({nativePendingIds.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => queuePatchScan('scan-native', nativeSource, `Run ${nativeProviderLabel} patch scan`)}
+            disabled={controlAction !== null}
+            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {controlAction === 'scan-native' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4 text-muted-foreground" />}
+            Run OS patch scan
+          </button>
+
+          <button
+            type="button"
+            onClick={() => queuePatchScan('scan-third-party', 'third_party', 'Run third-party patch scan')}
+            disabled={controlAction !== null}
+            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {controlAction === 'scan-third-party' ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4 text-muted-foreground" />}
+            Run 3rd-party scan
+          </button>
+
+          <button
+            type="button"
+            onClick={() => queuePatchInstall('install-third-party', thirdPartyPendingIds, 'Install pending third-party patches')}
+            disabled={controlAction !== null || thirdPartyPendingIds.length === 0}
+            className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {controlAction === 'install-third-party' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Package className="h-4 w-4 text-blue-500" />}
+            Install 3rd-party patches ({thirdPartyPendingIds.length})
+          </button>
+        </div>
+
+        {controlNotice && (
+          <div className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+            controlNotice.kind === 'success'
+              ? 'border-green-400/50 bg-green-500/10 text-green-700'
+              : 'border-destructive/40 bg-destructive/10 text-destructive'
+          }`}>
+            {controlNotice.message}
+          </div>
+        )}
+
+        {missingCount > 0 && (
+          <p className="mt-3 text-xs text-muted-foreground">
+            {missingCount} stale missing records are excluded from pending install counts.
+          </p>
+        )}
+      </div>
+
       <div className="rounded-lg border bg-card p-6 shadow-sm">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>

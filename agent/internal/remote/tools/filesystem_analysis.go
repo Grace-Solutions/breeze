@@ -18,8 +18,8 @@ const (
 	maxFSMaxDepth                = 64
 	defaultFSTopFiles            = 50
 	defaultFSTopDirs             = 30
-	defaultFSMaxEntries          = 2_000_000
-	maxFSMaxEntries              = 5_000_000
+	defaultFSMaxEntries          = 10_000_000
+	maxFSMaxEntries              = 25_000_000
 	defaultFSTimeoutSecs         = 20
 	maxFSErrors                  = 200
 	maxFSCleanupCandidates       = 1000
@@ -418,14 +418,17 @@ func AnalyzeFilesystem(payload map[string]any) CommandResult {
 		}
 	}
 
+	topDirCandidateLimit := clampInt(topDirsLimit*8, topDirsLimit, 2000)
+	topLargestDirCandidates := make([]FilesystemLargestDirectory, 0, topDirCandidateLimit)
 	for _, agg := range dirStats {
-		addTopLargestDir(&topLargestDirs, FilesystemLargestDirectory{
+		addTopLargestDir(&topLargestDirCandidates, FilesystemLargestDirectory{
 			Path:      agg.Path,
 			SizeBytes: agg.SizeBytes,
 			FileCount: agg.FileCount,
 			Estimated: agg.Incomplete,
-		}, topDirsLimit)
+		}, topDirCandidateLimit)
 	}
+	topLargestDirs = collapseAncestorDirectories(topLargestDirCandidates, topDirsLimit, 0.70)
 	sort.Slice(oldDownloads, func(i, j int) bool { return oldDownloads[i].SizeBytes > oldDownloads[j].SizeBytes })
 	if len(oldDownloads) > 200 {
 		oldDownloads = oldDownloads[:200]
@@ -643,6 +646,148 @@ func addTopLargestDir(top *[]FilesystemLargestDirectory, dir FilesystemLargestDi
 	}
 	(*top)[minIdx] = dir
 	sort.Slice(*top, func(i, j int) bool { return (*top)[i].SizeBytes > (*top)[j].SizeBytes })
+}
+
+func collapseAncestorDirectories(
+	candidates []FilesystemLargestDirectory,
+	limit int,
+	descendantRatio float64,
+) []FilesystemLargestDirectory {
+	if limit <= 0 || len(candidates) == 0 {
+		return []FilesystemLargestDirectory{}
+	}
+	if descendantRatio <= 0 {
+		descendantRatio = 0.70
+	}
+
+	items := append([]FilesystemLargestDirectory(nil), candidates...)
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].SizeBytes == items[j].SizeBytes {
+			return pathDepth(items[i].Path) > pathDepth(items[j].Path)
+		}
+		return items[i].SizeBytes > items[j].SizeBytes
+	})
+
+	pruned := make([]bool, len(items))
+	for i := range items {
+		if pruned[i] {
+			continue
+		}
+		ancestor := items[i]
+		if ancestor.SizeBytes <= 0 {
+			continue
+		}
+		for j := range items {
+			if i == j || pruned[j] {
+				continue
+			}
+			child := items[j]
+			if child.SizeBytes <= 0 {
+				continue
+			}
+			if !isDescendantPath(child.Path, ancestor.Path) {
+				continue
+			}
+			if shouldPruneAncestorByDescendant(ancestor, child, descendantRatio) {
+				pruned[i] = true
+				break
+			}
+		}
+	}
+
+	result := make([]FilesystemLargestDirectory, 0, limit)
+	for i := range items {
+		if pruned[i] {
+			continue
+		}
+		result = append(result, items[i])
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+func shouldPruneAncestorByDescendant(
+	ancestor FilesystemLargestDirectory,
+	child FilesystemLargestDirectory,
+	baseRatio float64,
+) bool {
+	if ancestor.SizeBytes <= 0 || child.SizeBytes <= 0 {
+		return false
+	}
+	effectiveRatio := baseRatio
+	if ancestor.Estimated && !child.Estimated {
+		effectiveRatio = minFloat(effectiveRatio, 0.45)
+	} else if ancestor.Estimated && child.Estimated {
+		effectiveRatio = minFloat(effectiveRatio, 0.60)
+	} else if !ancestor.Estimated && child.Estimated {
+		effectiveRatio = maxFloat(effectiveRatio, 0.85)
+	}
+	return float64(child.SizeBytes) >= float64(ancestor.SizeBytes)*effectiveRatio
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func pathDepth(path string) int {
+	normalized := normalizePathForHierarchy(path)
+	if normalized == "" || normalized == "/" {
+		return 0
+	}
+	parts := strings.Split(strings.Trim(normalized, "/"), "/")
+	depth := 0
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		depth++
+	}
+	return depth
+}
+
+func normalizePathForHierarchy(path string) string {
+	normalized := strings.TrimSpace(strings.ReplaceAll(path, "\\", "/"))
+	if normalized == "" {
+		return ""
+	}
+	for strings.Contains(normalized, "//") {
+		normalized = strings.ReplaceAll(normalized, "//", "/")
+	}
+	if strings.HasSuffix(normalized, "/") && normalized != "/" {
+		if !(len(normalized) == 3 && normalized[1] == ':') {
+			normalized = strings.TrimSuffix(normalized, "/")
+		}
+	}
+	return strings.ToLower(normalized)
+}
+
+func isDescendantPath(path string, ancestor string) bool {
+	normalizedPath := normalizePathForHierarchy(path)
+	normalizedAncestor := normalizePathForHierarchy(ancestor)
+	if normalizedPath == "" || normalizedAncestor == "" || normalizedPath == normalizedAncestor {
+		return false
+	}
+
+	if normalizedAncestor == "/" {
+		return strings.HasPrefix(normalizedPath, "/") && normalizedPath != "/"
+	}
+	if len(normalizedAncestor) == 3 && normalizedAncestor[1] == ':' && normalizedAncestor[2] == '/' {
+		return strings.HasPrefix(normalizedPath, normalizedAncestor) && normalizedPath != normalizedAncestor
+	}
+
+	return strings.HasPrefix(normalizedPath, normalizedAncestor+"/")
 }
 
 func markDirAndAncestorsIncomplete(dirStats map[string]*fsDirAggregate, path string) {

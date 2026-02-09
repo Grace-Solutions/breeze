@@ -26,6 +26,7 @@ import {
 import { createHash, randomBytes } from 'crypto';
 import { agentAuthMiddleware } from '../middleware/agentAuth';
 import { writeAuditEvent } from '../services/auditEvents';
+import { queueCommandForExecution } from '../services/commandQueue';
 import {
   getFilesystemScanState,
   mergeFilesystemAnalysisPayload,
@@ -181,6 +182,12 @@ const filesystemThresholdCooldownMinutes = parseEnvBoundedNumber(
   5,
   1440
 );
+const filesystemAutoResumeMaxRuns = parseEnvBoundedNumber(
+  process.env.FILESYSTEM_ANALYSIS_AUTO_RESUME_MAX_RUNS,
+  200,
+ 1,
+ 5000
+);
 
 function parseEnvBoundedNumber(raw: string | undefined, fallback: number, min: number, max: number): number {
   if (!raw) return fallback;
@@ -249,10 +256,12 @@ async function maybeQueueThresholdFilesystemAnalysis(
       maxDepth: 32,
       topFiles: 50,
       topDirs: 30,
-      maxEntries: 2_000_000,
+      maxEntries: 10_000_000,
       workers: 6,
       timeoutSeconds: 300,
       scanMode: 'baseline',
+      autoContinue: true,
+      resumeAttempt: 0,
       followSymlinks: false,
     },
     status: 'pending',
@@ -271,6 +280,21 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+function asBoolean(value: unknown, defaultValue = false): boolean {
+  return typeof value === 'boolean' ? value : defaultValue;
+}
+
+function asInt(value: unknown, defaultValue = 0): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.trunc(value);
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.trunc(parsed);
+  }
+  return defaultValue;
 }
 
 function parseDate(value: unknown): Date | null {
@@ -644,6 +668,66 @@ async function handleFilesystemAnalysisCommandResult(
     checkpoint: hasCheckpoint ? { pendingDirs } : {},
     aggregate: scanMode === 'baseline' && !baselineCompleted ? mergedPayload : {},
     hotDirectories: mergedHotDirectories,
+  });
+
+  if (!hasCheckpoint || scanMode !== 'baseline') {
+    return;
+  }
+
+  const autoContinue = asBoolean(payload.autoContinue, true);
+  if (!autoContinue) {
+    return;
+  }
+
+  const resumeAttempt = Math.max(0, asInt(payload.resumeAttempt, 0));
+  if (resumeAttempt >= filesystemAutoResumeMaxRuns) {
+    return;
+  }
+
+  const [inFlightScan] = await db
+    .select({ id: deviceCommands.id })
+    .from(deviceCommands)
+    .where(
+      and(
+        eq(deviceCommands.deviceId, command.deviceId),
+        eq(deviceCommands.type, filesystemAnalysisCommandType),
+        sql`${deviceCommands.status} IN ('pending', 'sent')`
+      )
+    )
+    .limit(1);
+
+  if (inFlightScan) {
+    return;
+  }
+
+  const nextPayload: Record<string, unknown> = {
+    ...(isObject(payload) ? payload : {}),
+    scanMode: 'baseline',
+    checkpoint: { pendingDirs },
+    autoContinue: true,
+    resumeAttempt: resumeAttempt + 1,
+  };
+  delete nextPayload.targetDirectories;
+
+  const queued = await queueCommandForExecution(
+    command.deviceId,
+    filesystemAnalysisCommandType,
+    nextPayload,
+    {
+      userId: command.createdBy ?? undefined,
+      preferHeartbeat: false,
+    }
+  );
+  if (queued.command) {
+    return;
+  }
+
+  await db.insert(deviceCommands).values({
+    deviceId: command.deviceId,
+    type: filesystemAnalysisCommandType,
+    payload: nextPayload,
+    status: 'pending',
+    createdBy: command.createdBy,
   });
 }
 

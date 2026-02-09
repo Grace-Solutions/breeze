@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 // Key constants for structured log fields.
@@ -20,7 +21,89 @@ const (
 
 type contextKey struct{}
 
-var defaultLogger = slog.Default()
+// switchableHandler lets package-level loggers created before Init()
+// dynamically pick up the configured handler once Init runs.
+type switchableHandler struct {
+	state  *switchableState
+	attrs  []slog.Attr
+	groups []string
+}
+
+type switchableState struct {
+	current atomic.Value // stores slog.Handler
+}
+
+func newSwitchableHandler(h slog.Handler) *switchableHandler {
+	state := &switchableState{}
+	state.current.Store(h)
+	return &switchableHandler{state: state}
+}
+
+func (h *switchableHandler) set(handler slog.Handler) {
+	h.state.current.Store(handler)
+}
+
+func (h *switchableHandler) base() slog.Handler {
+	return h.state.current.Load().(slog.Handler)
+}
+
+func (h *switchableHandler) materialize() slog.Handler {
+	handler := h.base()
+	for _, group := range h.groups {
+		handler = handler.WithGroup(group)
+	}
+	if len(h.attrs) > 0 {
+		handler = handler.WithAttrs(h.attrs)
+	}
+	return handler
+}
+
+func (h *switchableHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.materialize().Enabled(ctx, level)
+}
+
+func (h *switchableHandler) Handle(ctx context.Context, record slog.Record) error {
+	return h.materialize().Handle(ctx, record)
+}
+
+func (h *switchableHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	merged := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	merged = append(merged, h.attrs...)
+	merged = append(merged, attrs...)
+
+	groups := make([]string, len(h.groups))
+	copy(groups, h.groups)
+
+	return &switchableHandler{
+		state:  h.state,
+		attrs:  merged,
+		groups: groups,
+	}
+}
+
+func (h *switchableHandler) WithGroup(name string) slog.Handler {
+	attrs := make([]slog.Attr, len(h.attrs))
+	copy(attrs, h.attrs)
+
+	groups := make([]string, 0, len(h.groups)+1)
+	groups = append(groups, h.groups...)
+	groups = append(groups, name)
+
+	return &switchableHandler{
+		state:  h.state,
+		attrs:  attrs,
+		groups: groups,
+	}
+}
+
+var (
+	rootHandler   = newSwitchableHandler(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	defaultLogger = slog.New(rootHandler)
+)
+
+func init() {
+	slog.SetDefault(defaultLogger)
+}
 
 // Init initializes the global logger. Call once after config is loaded.
 // format: "json" or "text" (default "text")
@@ -44,7 +127,8 @@ func Init(format, level string, output io.Writer) {
 		handler = slog.NewTextHandler(output, opts)
 	}
 
-	defaultLogger = slog.New(handler)
+	rootHandler.set(handler)
+	defaultLogger = slog.New(rootHandler)
 	slog.SetDefault(defaultLogger)
 }
 

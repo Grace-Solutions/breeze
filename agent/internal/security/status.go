@@ -703,14 +703,18 @@ func getEncryptionStatusWindows() (bool, error) {
 		return false, err
 	}
 
-	state := strings.TrimSpace(output)
+	return parseBitLockerProtectionStatus(output)
+}
+
+func parseBitLockerProtectionStatus(rawState string) (bool, error) {
+	state := strings.ToLower(strings.TrimSpace(rawState))
 	switch state {
-	case "1":
+	case "1", "on", "true", "enabled":
 		return true, nil
-	case "0":
+	case "0", "off", "false", "disabled":
 		return false, nil
 	default:
-		return false, fmt.Errorf("unexpected BitLocker status: %s", state)
+		return false, fmt.Errorf("unexpected BitLocker status: %s", strings.TrimSpace(rawState))
 	}
 }
 

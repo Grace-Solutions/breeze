@@ -17,6 +17,7 @@ type PeerCredentials struct {
 	UID        uint32
 	GID        uint32
 	BinaryPath string
+	SID        string // Empty on Unix; populated on Windows.
 }
 
 // GetPeerCredentials returns the kernel-verified PID/UID/GID of the peer

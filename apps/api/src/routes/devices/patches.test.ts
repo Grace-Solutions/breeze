@@ -27,7 +27,12 @@ vi.mock('../../db/schema', () => ({
     id: 'patches.id',
     source: 'patches.source',
     externalId: 'patches.externalId',
-    title: 'patches.title'
+    title: 'patches.title',
+    description: 'patches.description',
+    severity: 'patches.severity',
+    category: 'patches.category',
+    releaseDate: 'patches.releaseDate',
+    requiresReboot: 'patches.requiresReboot'
   },
   devicePatches: {
     id: 'devicePatches.id',
@@ -74,6 +79,18 @@ function selectWhereResult(rows: unknown[]) {
   };
 }
 
+function selectPatchStatusResult(rows: unknown[]) {
+  return {
+    from: vi.fn().mockReturnValue({
+      innerJoin: vi.fn().mockReturnValue({
+        where: vi.fn().mockReturnValue({
+          orderBy: vi.fn().mockResolvedValue(rows)
+        })
+      })
+    })
+  };
+}
+
 function selectWhereLimitResult(rows: unknown[]) {
   return {
     from: vi.fn().mockReturnValue({
@@ -91,6 +108,79 @@ describe('device patch routes', () => {
     vi.clearAllMocks();
     app = new Hono();
     app.route('/devices', patchesRoutes);
+  });
+
+  it('separates actionable pending patches from missing records', async () => {
+    vi.mocked(getDeviceWithOrgCheck).mockResolvedValue({ id: DEVICE_ID, orgId: '11111111-1111-1111-1111-111111111111' } as any);
+    vi.mocked(db.select).mockReturnValueOnce(selectPatchStatusResult([
+      {
+        id: 'dp-1',
+        patchId: '11111111-1111-4111-8111-111111111111',
+        status: 'pending',
+        installedAt: null,
+        lastCheckedAt: '2026-02-09T10:00:00.000Z',
+        failureCount: 0,
+        lastError: null,
+        title: 'OS Update A',
+        description: 'Pending update',
+        severity: 'important',
+        category: 'system',
+        source: 'apple',
+        releaseDate: '2026-02-01',
+        requiresReboot: true
+      },
+      {
+        id: 'dp-2',
+        patchId: '22222222-2222-4222-8222-222222222222',
+        status: 'missing',
+        installedAt: null,
+        lastCheckedAt: '2026-02-09T10:00:00.000Z',
+        failureCount: 0,
+        lastError: null,
+        title: 'Old package entry',
+        description: 'Not seen in latest scan',
+        severity: 'unknown',
+        category: 'application',
+        source: 'third_party',
+        releaseDate: null,
+        requiresReboot: false
+      },
+      {
+        id: 'dp-3',
+        patchId: '33333333-3333-4333-8333-333333333333',
+        status: 'installed',
+        installedAt: '2026-02-08T10:00:00.000Z',
+        lastCheckedAt: '2026-02-09T10:00:00.000Z',
+        failureCount: 0,
+        lastError: null,
+        title: 'Installed update',
+        description: 'Installed',
+        severity: 'important',
+        category: 'system',
+        source: 'apple',
+        releaseDate: '2026-02-03',
+        requiresReboot: false
+      }
+    ]) as any);
+
+    const res = await app.request(`/devices/${DEVICE_ID}/patches`, {
+      method: 'GET',
+      headers: { Authorization: 'Bearer token' }
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.data.pending).toHaveLength(1);
+    expect(body.data.pending[0].id).toBe('11111111-1111-4111-8111-111111111111');
+    expect(body.data.pending[0].status).toBe('pending');
+
+    expect(body.data.missing).toHaveLength(1);
+    expect(body.data.missing[0].id).toBe('22222222-2222-4222-8222-222222222222');
+    expect(body.data.missing[0].status).toBe('missing');
+
+    expect(body.data.installed).toHaveLength(1);
+    expect(body.data.compliancePercent).toBe(50);
   });
 
   it('queues install_patches command with patch metadata', async () => {

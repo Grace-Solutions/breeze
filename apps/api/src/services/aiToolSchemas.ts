@@ -167,7 +167,7 @@ export const toolInputSchemas: Record<string, z.ZodType> = {
     maxDepth: z.number().int().min(1).max(64).optional(),
     topFiles: z.number().int().min(1).max(500).optional(),
     topDirs: z.number().int().min(1).max(200).optional(),
-    maxEntries: z.number().int().min(1_000).max(5_000_000).optional(),
+    maxEntries: z.number().int().min(1_000).max(25_000_000).optional(),
     workers: z.number().int().min(1).max(32).optional(),
     timeoutSeconds: z.number().int().min(5).max(900).optional(),
   }),

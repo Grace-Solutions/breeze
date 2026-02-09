@@ -93,7 +93,75 @@ function formatBytes(value: number | undefined): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (value < 1024 * 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(value / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
+
+function normalizeHierarchyPath(path: string): string {
+  let normalized = path.trim().replace(/\\/g, '/');
+  while (normalized.includes('//')) normalized = normalized.replaceAll('//', '/');
+  if (normalized.length > 1 && normalized.endsWith('/')) {
+    const isWindowsDriveRoot = normalized.length === 3 && normalized[1] === ':' && normalized[2] === '/';
+    if (!isWindowsDriveRoot) {
+      normalized = normalized.slice(0, -1);
+    }
+  }
+  return normalized.toLowerCase();
+}
+
+function isDescendantPath(path: string, ancestor: string): boolean {
+  const normalizedPath = normalizeHierarchyPath(path);
+  const normalizedAncestor = normalizeHierarchyPath(ancestor);
+  if (!normalizedPath || !normalizedAncestor || normalizedPath === normalizedAncestor) return false;
+  if (normalizedAncestor === '/') return normalizedPath.startsWith('/') && normalizedPath !== '/';
+  if (normalizedAncestor.length === 3 && normalizedAncestor[1] === ':' && normalizedAncestor[2] === '/') {
+    return normalizedPath.startsWith(normalizedAncestor) && normalizedPath !== normalizedAncestor;
+  }
+  return normalizedPath.startsWith(`${normalizedAncestor}/`);
+}
+
+function collapseAncestorDirectories<T extends { path?: string; sizeBytes?: number }>(
+  directories: T[],
+  limit: number,
+  descendantRatio = 0.70
+): T[] {
+  if (limit <= 0 || directories.length === 0) return [];
+  const items = directories
+    .filter((item) => typeof item.path === 'string' && item.path.length > 0)
+    .slice()
+    .sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
+
+  const pruned = new Set<number>();
+  for (let i = 0; i < items.length; i += 1) {
+    if (pruned.has(i)) continue;
+    const ancestorPath = items[i].path ?? '';
+    const ancestorBytes = items[i].sizeBytes ?? 0;
+    if (!ancestorPath || ancestorBytes <= 0) continue;
+
+    for (let j = 0; j < items.length; j += 1) {
+      if (i === j || pruned.has(j)) continue;
+      const childPath = items[j].path ?? '';
+      const childBytes = items[j].sizeBytes ?? 0;
+      if (!childPath || childBytes <= 0) continue;
+      if (!isDescendantPath(childPath, ancestorPath)) continue;
+      const ancestorEstimated = Boolean((items[i] as { estimated?: boolean }).estimated);
+      const childEstimated = Boolean((items[j] as { estimated?: boolean }).estimated);
+      let effectiveRatio = descendantRatio;
+      if (ancestorEstimated && !childEstimated) {
+        effectiveRatio = Math.min(effectiveRatio, 0.45);
+      } else if (ancestorEstimated && childEstimated) {
+        effectiveRatio = Math.min(effectiveRatio, 0.60);
+      } else if (!ancestorEstimated && childEstimated) {
+        effectiveRatio = Math.max(effectiveRatio, 0.85);
+      }
+      if (childBytes >= ancestorBytes * effectiveRatio) {
+        pruned.add(i);
+        break;
+      }
+    }
+  }
+
+  return items.filter((_, index) => !pruned.has(index)).slice(0, limit);
 }
 
 function formatDateTime(value: string | undefined): string {
@@ -246,7 +314,7 @@ export default function DeviceFilesystemTab({ deviceId, osType, onOpenFiles }: D
           maxDepth: 32,
           topFiles: 50,
           topDirs: 30,
-          maxEntries: 2000000,
+          maxEntries: 10000000,
           workers: 6,
           timeoutSeconds,
         }),
@@ -300,7 +368,7 @@ export default function DeviceFilesystemTab({ deviceId, osType, onOpenFiles }: D
   const previewTopCandidates = cleanupPreview?.candidates.slice(0, 6) ?? [];
   const previewCategorySummary = useMemo(() => cleanupPreview?.categories ?? [], [cleanupPreview]);
   const topLargestFiles = snapshot?.topLargestFiles?.slice(0, 8) ?? [];
-  const topLargestDirectories = snapshot?.topLargestDirectories?.slice(0, 8) ?? [];
+  const topLargestDirectories = collapseAncestorDirectories(snapshot?.topLargestDirectories ?? [], 8);
   const oldDownloadsCount = snapshot?.oldDownloads?.length ?? 0;
   const unrotatedLogCount = snapshot?.unrotatedLogs?.length ?? 0;
   const duplicateGroupCount = snapshot?.duplicateCandidates?.length ?? 0;
@@ -492,7 +560,7 @@ export default function DeviceFilesystemTab({ deviceId, osType, onOpenFiles }: D
                     topLargestFiles.map((item) => (
                       <div key={item.path} className="flex items-center justify-between gap-2 text-sm">
                         <span className="truncate">{item.path}</span>
-                        <span className="font-medium">{formatBytes(item.sizeBytes)}</span>
+                        <span className="shrink-0 whitespace-nowrap text-right font-medium tabular-nums">{formatBytes(item.sizeBytes)}</span>
                       </div>
                     ))
                   )}
@@ -511,7 +579,7 @@ export default function DeviceFilesystemTab({ deviceId, osType, onOpenFiles }: D
                     topLargestDirectories.map((item) => (
                       <div key={item.path} className="flex items-center justify-between gap-2 rounded bg-muted/20 px-2 py-1.5 text-sm">
                         <span className="truncate">{item.path}</span>
-                        <span className="font-medium">{item.estimated ? '>=' : ''}{formatBytes(item.sizeBytes)}</span>
+                        <span className="shrink-0 whitespace-nowrap text-right font-medium tabular-nums">{item.estimated ? '>=' : ''}{formatBytes(item.sizeBytes)}</span>
                       </div>
                     ))
                   )}
@@ -564,7 +632,7 @@ export default function DeviceFilesystemTab({ deviceId, osType, onOpenFiles }: D
                 {previewTopCandidates.map((item) => (
                   <div key={item.path} className="flex items-center justify-between gap-2 text-sm">
                     <span className="truncate">{item.path}</span>
-                    <span className="font-medium">{formatBytes(item.sizeBytes)}</span>
+                    <span className="shrink-0 whitespace-nowrap text-right font-medium tabular-nums">{formatBytes(item.sizeBytes)}</span>
                   </div>
                 ))}
                 {previewTopCandidates.length === 0 && (

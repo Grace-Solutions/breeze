@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DevicePatchStatusTab from './DevicePatchStatusTab';
@@ -110,5 +110,152 @@ describe('DevicePatchStatusTab', () => {
     await screen.findByText('Pending Apple Updates');
     expect(screen.queryByText('Installed Apple Updates')).not.toBeNull();
     expect(screen.queryByText('Pending Windows Updates')).toBeNull();
+  });
+
+  it('queues OS scan with source for a Windows device', async () => {
+    fetchWithAuthMock
+      .mockResolvedValueOnce(
+        makeJsonResponse({
+          data: {
+            compliancePercent: 70,
+            pending: [],
+            installed: []
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        makeJsonResponse({
+          queuedCommandIds: ['cmd-1'],
+          jobId: 'scan-123'
+        })
+      );
+
+    render(<DevicePatchStatusTab deviceId={deviceId} osType="windows" />);
+
+    const button = await screen.findByRole('button', { name: 'Run OS patch scan' });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(fetchWithAuthMock).toHaveBeenNthCalledWith(
+        2,
+        '/patches/scan',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            deviceIds: [deviceId],
+            source: 'microsoft'
+          })
+        })
+      );
+    });
+
+    await screen.findByText(/Run Windows patch scan queued/i);
+  });
+
+  it('queues install for pending third-party patches', async () => {
+    fetchWithAuthMock
+      .mockResolvedValueOnce(
+        makeJsonResponse({
+          data: {
+            compliancePercent: 10,
+            pending: [
+              {
+                id: 'f0cfbd5f-6f8d-4682-9f52-bc37f8d6edbf',
+                title: 'Google Chrome',
+                source: 'third_party',
+                category: 'application',
+                status: 'pending'
+              }
+            ],
+            installed: []
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        makeJsonResponse({
+          success: true,
+          commandId: 'cmd-install-1',
+          patchCount: 1
+        })
+      );
+
+    render(<DevicePatchStatusTab deviceId={deviceId} osType="macos" />);
+
+    const installButton = await screen.findByRole('button', { name: /Install 3rd-party patches \(1\)/i });
+    fireEvent.click(installButton);
+
+    await waitFor(() => {
+      expect(fetchWithAuthMock).toHaveBeenNthCalledWith(
+        2,
+        `/devices/${deviceId}/patches/install`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            patchIds: ['f0cfbd5f-6f8d-4682-9f52-bc37f8d6edbf']
+          })
+        })
+      );
+    });
+
+    await screen.findByText(/Install pending third-party patches queued/i);
+  });
+
+  it('disables install controls when there are no pending patches', async () => {
+    fetchWithAuthMock.mockResolvedValue(
+      makeJsonResponse({
+        data: {
+          compliancePercent: 100,
+          pending: [],
+          installed: []
+        }
+      })
+    );
+
+    render(<DevicePatchStatusTab deviceId={deviceId} osType="linux" />);
+
+    const installOsButton = await screen.findByRole('button', { name: /Install pending OS patches \(0\)/i });
+    const installThirdPartyButton = await screen.findByRole('button', { name: /Install 3rd-party patches \(0\)/i });
+
+    expect((installOsButton as HTMLButtonElement).disabled).toBe(true);
+    expect((installThirdPartyButton as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('excludes missing records from pending install counts', async () => {
+    fetchWithAuthMock.mockResolvedValue(
+      makeJsonResponse({
+        data: {
+          compliancePercent: 100,
+          pending: [],
+          missing: [
+            {
+              id: '34d7275b-055d-4ca2-8f42-04c61f8513d1',
+              title: 'Old package record',
+              source: 'third_party',
+              category: 'application',
+              status: 'missing'
+            }
+          ],
+          installed: [],
+          patches: [
+            {
+              id: '34d7275b-055d-4ca2-8f42-04c61f8513d1',
+              title: 'Old package record',
+              source: 'third_party',
+              category: 'application',
+              status: 'missing'
+            }
+          ]
+        }
+      })
+    );
+
+    render(<DevicePatchStatusTab deviceId={deviceId} osType="macos" />);
+
+    const installOsButton = await screen.findByRole('button', { name: /Install pending OS patches \(0\)/i });
+    const installThirdPartyButton = await screen.findByRole('button', { name: /Install 3rd-party patches \(0\)/i });
+
+    expect((installOsButton as HTMLButtonElement).disabled).toBe(true);
+    expect((installThirdPartyButton as HTMLButtonElement).disabled).toBe(true);
+    await screen.findByText(/1 stale missing records are excluded from pending install counts\./i);
   });
 });

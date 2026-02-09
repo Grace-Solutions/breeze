@@ -31,7 +31,7 @@ const scanFilesystemBodySchema = z.object({
   maxDepth: z.number().int().min(1).max(64).optional(),
   topFiles: z.number().int().min(1).max(500).optional(),
   topDirs: z.number().int().min(1).max(200).optional(),
-  maxEntries: z.number().int().min(1000).max(5_000_000).optional(),
+  maxEntries: z.number().int().min(1000).max(25_000_000).optional(),
   workers: z.number().int().min(1).max(32).optional(),
   timeoutSeconds: z.number().int().min(5).max(900).optional(),
   followSymlinks: z.boolean().optional(),
@@ -159,6 +159,7 @@ filesystemRoutes.post(
 
     const strategy = payload.strategy ?? 'auto';
     const isRootScopedScan = payload.path === getDefaultScanPathForOs((device as { osType?: unknown }).osType);
+    const autoContinue = isRootScopedScan;
     if (strategy === 'baseline') {
       scanMode = 'baseline';
     } else if (strategy === 'incremental') {
@@ -194,6 +195,8 @@ filesystemRoutes.post(
       scanMode,
       checkpoint: checkpointPayload,
       targetDirectories,
+      autoContinue: scanMode === 'baseline' ? autoContinue : false,
+      resumeAttempt: 0,
     };
     delete (commandPayload as { strategy?: string }).strategy;
 
