@@ -260,7 +260,7 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 - [x] Risk-classified action engine
 - [x] Multi-tenant hierarchy
 - [x] macOS agent
-- [ ] Windows agent testing & hardening
+- [x] Windows agent
 - [ ] Linux agent testing & hardening
 - [ ] Network discovery
 - [ ] Backup
@@ -289,8 +289,8 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 | Platform | Agent Status | Notes |
 |---|---|---|
 | macOS | ✅ Stable | Primary development platform |
-| Windows | 🧪 Built, testing | Go cross-compiled, core features working |
-| Linux | 🧪 Built, testing | Go cross-compiled, core features working |
+| Windows | ✅ Stable | Full feature parity with macOS |
+| Linux | 🧪 Built, testing | Core features working, looking for testers |
 
 ---
 
