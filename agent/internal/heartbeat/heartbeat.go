@@ -875,6 +875,15 @@ func (h *Heartbeat) availablePatchesToMaps(patches []patching.AvailablePatch) []
 		if category == "" {
 			category = h.mapPatchProviderCategory(p.Provider)
 		}
+		// Homebrew provider IDs encode casks as "homebrew:cask:<name>".
+		// Preserve that distinction so UI can show richer macOS package details.
+		if p.Provider == "homebrew" {
+			if strings.HasPrefix(p.ID, "homebrew:cask:") {
+				category = "homebrew-cask"
+			} else {
+				category = "homebrew"
+			}
+		}
 		items[i] = map[string]any{
 			"name":            p.Title,
 			"version":         p.Version,

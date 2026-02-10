@@ -103,6 +103,46 @@ describe('auth store fetchWithAuth', () => {
     expect(useAuthStore.getState().tokens?.accessToken).toBe(refreshedTokens.accessToken);
   });
 
+  it('restores token before request when authenticated but token is missing', async () => {
+    useAuthStore.setState({
+      user: baseUser,
+      tokens: null,
+      isAuthenticated: true,
+      isLoading: false,
+      mfaPending: false,
+      mfaTempToken: null
+    });
+
+    const refreshedTokens: Tokens = {
+      accessToken: 'access-restored',
+      expiresInSeconds: 3600
+    };
+
+    const refreshSuccess = makeResponse({ tokens: refreshedTokens }, true, 200);
+    const apiSuccess = makeResponse({ data: { ok: true } }, true, 200);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(refreshSuccess)
+      .mockResolvedValueOnce(apiSuccess);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await fetchWithAuth('/devices');
+
+    expect(response).toBe(apiSuccess);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:3001/api/v1/auth/refresh',
+      expect.objectContaining({ method: 'POST' })
+    );
+
+    const secondCall = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(secondCall[0]).toBe('http://localhost:3001/api/v1/devices');
+    expect(new Headers(secondCall[1].headers).get('Authorization')).toBe(`Bearer ${refreshedTokens.accessToken}`);
+    expect(useAuthStore.getState().tokens?.accessToken).toBe(refreshedTokens.accessToken);
+  });
+
   it('logs out when token refresh fails', async () => {
     useAuthStore.getState().login(baseUser, baseTokens);
 
@@ -118,6 +158,40 @@ describe('auth store fetchWithAuth', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
     expect(useAuthStore.getState().tokens).toBeNull();
     expect(useAuthStore.getState().user).toBeNull();
+  });
+
+  it('deduplicates concurrent refresh requests', async () => {
+    useAuthStore.getState().login(baseUser, baseTokens);
+    const refreshedTokens: Tokens = {
+      accessToken: 'access-new',
+      expiresInSeconds: 3600
+    };
+
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/api/v1/auth/refresh')) {
+        return makeResponse({ tokens: refreshedTokens }, true, 200);
+      }
+
+      const authHeader = new Headers(init?.headers).get('Authorization');
+      if (authHeader === `Bearer ${refreshedTokens.accessToken}`) {
+        return makeResponse({ ok: true }, true, 200);
+      }
+
+      return makeResponse({ error: 'unauthorized' }, false, 401);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const [first, second] = await Promise.all([
+      fetchWithAuth('/devices'),
+      fetchWithAuth('/alerts')
+    ]);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(useAuthStore.getState().tokens?.accessToken).toBe(refreshedTokens.accessToken);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/api/v1/auth/refresh'))).toHaveLength(1);
   });
 });
 

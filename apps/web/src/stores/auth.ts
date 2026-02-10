@@ -136,9 +136,23 @@ async function requestTokenRefresh(): Promise<Tokens | null> {
   return tokens?.accessToken ? tokens : null;
 }
 
+let tokenRefreshInFlight: Promise<Tokens | null> | null = null;
+
+async function requestTokenRefreshShared(): Promise<Tokens | null> {
+  if (tokenRefreshInFlight) {
+    return tokenRefreshInFlight;
+  }
+
+  tokenRefreshInFlight = requestTokenRefresh().finally(() => {
+    tokenRefreshInFlight = null;
+  });
+
+  return tokenRefreshInFlight;
+}
+
 export async function restoreAccessTokenFromCookie(): Promise<boolean> {
   try {
-    const tokens = await requestTokenRefresh();
+    const tokens = await requestTokenRefreshShared();
     if (!tokens) return false;
     useAuthStore.getState().setTokens(tokens);
     return true;
@@ -148,7 +162,19 @@ export async function restoreAccessTokenFromCookie(): Promise<boolean> {
 }
 
 export async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
-  const { tokens, logout, setTokens } = useAuthStore.getState();
+  const { tokens: initialTokens, isAuthenticated, logout, setTokens } = useAuthStore.getState();
+  let tokens = initialTokens;
+  const previousAccessToken = tokens?.accessToken ?? null;
+
+  // During app bootstrap we can have a persisted authenticated user but no in-memory access token yet.
+  // Recover from refresh cookie first to avoid firing unauthenticated API calls.
+  if (!tokens?.accessToken && isAuthenticated) {
+    const restoredTokens = await requestTokenRefreshShared();
+    if (restoredTokens) {
+      setTokens(restoredTokens);
+      tokens = restoredTokens;
+    }
+  }
 
   const headers = new Headers(options.headers);
 
@@ -162,7 +188,7 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}): Pro
 
   // If unauthorized, attempt cookie-backed refresh once
   if (response.status === 401) {
-    const newTokens = await requestTokenRefresh();
+    const newTokens = await requestTokenRefreshShared();
     if (newTokens) {
       setTokens(newTokens);
 
@@ -170,8 +196,15 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}): Pro
       headers.set('Authorization', `Bearer ${newTokens.accessToken}`);
       response = await fetch(buildApiUrl(url), { ...options, headers, credentials: 'include' });
     } else {
-      // Refresh failed, logout
-      logout();
+      // If another in-flight request already refreshed state, retry once with latest token.
+      const latestToken = useAuthStore.getState().tokens?.accessToken;
+      if (latestToken && latestToken !== previousAccessToken) {
+        headers.set('Authorization', `Bearer ${latestToken}`);
+        response = await fetch(buildApiUrl(url), { ...options, headers, credentials: 'include' });
+      } else {
+        // Refresh failed and no newer token exists; logout.
+        logout();
+      }
     }
   }
 
