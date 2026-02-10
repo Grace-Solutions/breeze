@@ -102,16 +102,16 @@ export async function listSessions(auth: AuthContext, options: { status?: string
   return sessions;
 }
 
-export async function closeSession(sessionId: string, auth: AuthContext): Promise<boolean> {
+export async function closeSession(sessionId: string, auth: AuthContext): Promise<{ orgId: string } | null> {
   const session = await getSession(sessionId, auth);
-  if (!session) return false;
+  if (!session) return null;
 
   await db
     .update(aiSessions)
     .set({ status: 'closed', updatedAt: new Date() })
     .where(eq(aiSessions.id, sessionId));
 
-  return true;
+  return { orgId: session.orgId };
 }
 
 export async function getSessionMessages(sessionId: string, auth: AuthContext) {
@@ -661,12 +661,14 @@ async function* agenticLoop(
  * Wait for a tool execution to be approved or rejected.
  * Polls the DB with exponential backoff.
  */
-async function waitForApproval(executionId: string, timeoutMs: number): Promise<boolean> {
+export async function waitForApproval(executionId: string, timeoutMs: number, signal?: AbortSignal): Promise<boolean> {
   const startTime = Date.now();
   let pollInterval = 500;
   let consecutiveErrors = 0;
 
   while (Date.now() - startTime < timeoutMs) {
+    if (signal?.aborted) return false;
+
     try {
       const [execution] = await db
         .select({ status: aiToolExecutions.status })
@@ -795,7 +797,7 @@ async function loadConversationHistory(sessionId: string): Promise<Anthropic.Mes
 // System Prompt
 // ============================================
 
-function buildSystemPrompt(auth: AuthContext, pageContext?: AiPageContext): string {
+export function buildSystemPrompt(auth: AuthContext, pageContext?: AiPageContext): string {
   const parts: string[] = [];
 
   parts.push(`You are Breeze AI, an intelligent IT assistant built into the Breeze RMM platform. You help IT technicians and MSP staff manage devices, troubleshoot issues, analyze security threats, and build automations.

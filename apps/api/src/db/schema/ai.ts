@@ -28,6 +28,7 @@ export const aiSessions = pgTable('ai_sessions', {
   totalCostCents: real('total_cost_cents').notNull().default(0),
   turnCount: integer('turn_count').notNull().default(0),
   maxTurns: integer('max_turns').notNull().default(50),
+  sdkSessionId: varchar('sdk_session_id', { length: 255 }),
   lastActivityAt: timestamp('last_activity_at').defaultNow().notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull()

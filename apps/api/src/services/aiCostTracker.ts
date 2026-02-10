@@ -127,9 +127,11 @@ export async function recordUsage(
   const dailyKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
   const monthlyKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
 
-  await db.transaction(async (tx) => {
-    // Update session totals
-    await tx
+  // Run queries individually instead of in a transaction to avoid
+  // SAVEPOINT errors with the postgres.js driver (postgres@3.4.8).
+  // These are additive counters so partial failure is acceptable.
+  try {
+    await db
       .update(aiSessions)
       .set({
         totalInputTokens: sql`${aiSessions.totalInputTokens} + ${inputTokens}`,
@@ -140,10 +142,15 @@ export async function recordUsage(
         updatedAt: new Date()
       })
       .where(eq(aiSessions.id, sessionId));
+  } catch (err) {
+    console.error(`[AI] Failed to update session totals for session=${sessionId}, cost=${costCents}:`, err);
+    throw err;
+  }
 
-    // Update daily/monthly aggregates
-    for (const [period, periodKey] of [['daily', dailyKey], ['monthly', monthlyKey]] as const) {
-      await tx
+  // Update daily/monthly aggregates
+  for (const [period, periodKey] of [['daily', dailyKey], ['monthly', monthlyKey]] as const) {
+    try {
+      await db
         .insert(aiCostUsage)
         .values({
           orgId,
@@ -169,13 +176,123 @@ export async function recordUsage(
             updatedAt: new Date()
           }
         });
+    } catch (err) {
+      console.error(`[AI] Failed to update ${period} aggregate for org=${orgId}, key=${periodKey}, cost=${costCents}:`, err);
+      // Continue to attempt the other period
     }
-  });
+  }
 
-  // Cost anomaly detection (after transaction completes)
+  // Cost anomaly detection (after counter updates)
   checkCostAnomalies(sessionId, orgId, costCents, dailyKey).catch(err => {
     console.error('[AI] Cost anomaly check failed:', err);
   });
+}
+
+/**
+ * Record usage from the Claude Agent SDK result message.
+ * The SDK provides total_cost_usd and per-model token breakdowns.
+ */
+export async function recordUsageFromSdkResult(
+  sessionId: string,
+  orgId: string,
+  result: {
+    total_cost_usd: number;
+    usage: { input_tokens: number; output_tokens: number };
+    num_turns: number;
+  }
+): Promise<void> {
+  const costCents = Math.round(result.total_cost_usd * 100 * 100) / 100; // USD → cents, 2 decimal places
+  const { input_tokens: inputTokens, output_tokens: outputTokens } = result.usage;
+  const now = new Date();
+  const dailyKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+  const monthlyKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+
+  // Update session totals
+  try {
+    await db
+      .update(aiSessions)
+      .set({
+        totalInputTokens: sql`${aiSessions.totalInputTokens} + ${inputTokens}`,
+        totalOutputTokens: sql`${aiSessions.totalOutputTokens} + ${outputTokens}`,
+        totalCostCents: sql`${aiSessions.totalCostCents} + ${costCents}`,
+        turnCount: sql`${aiSessions.turnCount} + ${result.num_turns}`,
+        lastActivityAt: now,
+        updatedAt: now
+      })
+      .where(eq(aiSessions.id, sessionId));
+  } catch (err) {
+    console.error(`[AI] Failed to update session totals (SDK) for session=${sessionId}:`, err);
+    throw err;
+  }
+
+  // Update daily/monthly aggregates
+  for (const [period, periodKey] of [['daily', dailyKey], ['monthly', monthlyKey]] as const) {
+    try {
+      await db
+        .insert(aiCostUsage)
+        .values({
+          orgId,
+          period,
+          periodKey,
+          inputTokens,
+          outputTokens,
+          totalCostCents: costCents,
+          sessionCount: 0,
+          messageCount: 1,
+          toolExecutionCount: 0
+        })
+        .onConflictDoUpdate({
+          target: [aiCostUsage.orgId, aiCostUsage.period, aiCostUsage.periodKey],
+          set: {
+            inputTokens: sql`${aiCostUsage.inputTokens} + ${inputTokens}`,
+            outputTokens: sql`${aiCostUsage.outputTokens} + ${outputTokens}`,
+            totalCostCents: sql`${aiCostUsage.totalCostCents} + ${costCents}`,
+            messageCount: sql`${aiCostUsage.messageCount} + 1`,
+            updatedAt: now
+          }
+        });
+    } catch (err) {
+      console.error(`[AI] Failed to update ${period} aggregate (SDK) for org=${orgId}:`, err);
+    }
+  }
+
+  // Cost anomaly detection
+  checkCostAnomalies(sessionId, orgId, costCents, dailyKey).catch(err => {
+    console.error('[AI] Cost anomaly check failed (SDK):', err);
+  });
+}
+
+/**
+ * Get the remaining monthly budget for an org in USD.
+ * Returns null if no budget is configured (unlimited).
+ */
+export async function getRemainingBudgetUsd(orgId: string): Promise<number | null> {
+  const [budget] = await db
+    .select()
+    .from(aiBudgets)
+    .where(eq(aiBudgets.orgId, orgId))
+    .limit(1);
+
+  if (!budget || !budget.monthlyBudgetCents) return null;
+
+  const now = new Date();
+  const monthlyKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+
+  const [monthlyUsage] = await db
+    .select({ totalCostCents: aiCostUsage.totalCostCents })
+    .from(aiCostUsage)
+    .where(
+      and(
+        eq(aiCostUsage.orgId, orgId),
+        eq(aiCostUsage.period, 'monthly'),
+        eq(aiCostUsage.periodKey, monthlyKey)
+      )
+    )
+    .limit(1);
+
+  const usedCents = monthlyUsage?.totalCostCents ?? 0;
+  const remainingCents = Math.max(0, budget.monthlyBudgetCents - usedCents);
+  return remainingCents / 100; // Convert cents to USD
 }
 
 /**

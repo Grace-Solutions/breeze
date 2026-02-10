@@ -11,6 +11,7 @@ import { streamSSE } from 'hono/streaming';
 import { authMiddleware, requireScope } from '../middleware/auth';
 import {
   createSession,
+  getSession,
   listSessions,
   closeSession,
   getSessionMessages,
@@ -18,6 +19,7 @@ import {
   handleApproval,
   searchSessions
 } from '../services/aiAgent';
+import { sendMessageSdk } from '../services/aiAgentSdk';
 import { getUsageSummary, updateBudget, getSessionHistory } from '../services/aiCostTracker';
 import { writeRouteAudit } from '../services/auditEvents';
 import { db } from '../db';
@@ -139,7 +141,7 @@ aiRoutes.delete(
     }
 
     writeRouteAudit(c, {
-      orgId: auth.orgId,
+      orgId: closed.orgId,
       action: 'ai.session.close',
       resourceType: 'ai_session',
       resourceId: sessionId
@@ -163,8 +165,14 @@ aiRoutes.post(
     const sessionId = c.req.param('id');
     const body = c.req.valid('json');
 
+    // Fetch session to get the authoritative orgId (auth.orgId is null for partner/system users)
+    const session = await getSession(sessionId, auth);
+    if (!session) {
+      return c.json({ error: 'Session not found' }, 404);
+    }
+
     writeRouteAudit(c, {
-      orgId: auth.orgId,
+      orgId: session.orgId,
       action: 'ai.message.send',
       resourceType: 'ai_session',
       resourceId: sessionId,
@@ -173,7 +181,9 @@ aiRoutes.post(
 
     return streamSSE(c, async (stream) => {
       try {
-        const generator = sendMessage(sessionId, body.content, auth, body.pageContext, c);
+        const generator = process.env.USE_AGENT_SDK === '1'
+          ? sendMessageSdk(sessionId, body.content, auth, body.pageContext, c)
+          : sendMessage(sessionId, body.content, auth, body.pageContext, c);
 
         for await (const event of generator) {
           await stream.writeSSE({
@@ -209,13 +219,20 @@ aiRoutes.post(
     const executionId = c.req.param('executionId');
     const { approved } = c.req.valid('json');
 
+    // Fetch session first for orgId (auth.orgId is null for partner/system users)
+    const sessionId = c.req.param('id');
+    const approvalSession = await getSession(sessionId, auth);
+    if (!approvalSession) {
+      return c.json({ error: 'Session not found' }, 404);
+    }
+
     const success = await handleApproval(executionId, approved, auth);
     if (!success) {
       return c.json({ error: 'Execution not found or already processed' }, 404);
     }
 
     writeRouteAudit(c, {
-      orgId: auth.orgId,
+      orgId: approvalSession.orgId,
       action: 'ai.tool_approval.update',
       resourceType: 'ai_execution',
       resourceId: executionId,

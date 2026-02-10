@@ -345,7 +345,7 @@ function processStreamEvent(
         role: 'tool_use',
         content: '',
         toolName: event.toolName,
-        toolInput: event.input,
+        toolInput: event.input && Object.keys(event.input).length > 0 ? event.input : undefined,
         toolUseId: event.toolUseId,
         createdAt: new Date()
       };
