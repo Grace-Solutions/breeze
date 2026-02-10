@@ -763,13 +763,18 @@ export default function DeviceCompare({ timezone }: DeviceCompareProps = {}) {
     if (selectedDevices.length === 0) return;
     const generatedDate = formatDateTime(new Date().toISOString(), effectiveTimezone);
     const html = buildPdfHtml(selectedDevices, osLabels, generatedDate);
-    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=900,height=700');
-    if (!printWindow) return;
-    printWindow.document.open();
-    printWindow.document.write(html);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.print();
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const blobUrl = URL.createObjectURL(blob);
+    const printWindow = window.open(blobUrl, '_blank', 'width=900,height=700');
+    if (!printWindow) {
+      URL.revokeObjectURL(blobUrl);
+      return;
+    }
+    printWindow.addEventListener('afterprint', () => URL.revokeObjectURL(blobUrl));
+    printWindow.addEventListener('load', () => {
+      printWindow.focus();
+      printWindow.print();
+    });
   };
 
   const softwareComparison = useMemo(() => {

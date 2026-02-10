@@ -10,16 +10,42 @@ function getEncryptionKey(): Buffer {
     return cachedEncryptionKey;
   }
 
-  const keySource =
+  const dedicatedKey =
     process.env.APP_ENCRYPTION_KEY ||
     process.env.SSO_ENCRYPTION_KEY ||
-    process.env.SECRET_ENCRYPTION_KEY ||
+    process.env.SECRET_ENCRYPTION_KEY;
+
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (dedicatedKey) {
+    cachedEncryptionKey = createHash('sha256').update(dedicatedKey).digest();
+    return cachedEncryptionKey;
+  }
+
+  // In production, do NOT fall back to auth secrets — they serve a different purpose
+  if (isProduction) {
+    const hasAuthSecret = process.env.JWT_SECRET || process.env.SESSION_SECRET;
+    if (hasAuthSecret) {
+      console.warn(
+        '[secretCrypto] WARNING: JWT_SECRET/SESSION_SECRET found but APP_ENCRYPTION_KEY is not set. ' +
+        'In production, auth secrets are no longer used for encryption-at-rest. ' +
+        'Set APP_ENCRYPTION_KEY to a dedicated random value. See .env.example for details.'
+      );
+    }
+    throw new Error(
+      'Missing APP_ENCRYPTION_KEY for secret encryption in production. ' +
+      'Set APP_ENCRYPTION_KEY (or SSO_ENCRYPTION_KEY/SECRET_ENCRYPTION_KEY) in your environment.'
+    );
+  }
+
+  // In non-production, allow auth secrets as fallback for convenience
+  const keySource =
     process.env.JWT_SECRET ||
     process.env.SESSION_SECRET ||
     (process.env.NODE_ENV === 'test' ? 'test-only-secret-encryption-key' : null);
 
   if (!keySource) {
-    throw new Error('Missing APP_ENCRYPTION_KEY (or SSO_ENCRYPTION_KEY/JWT_SECRET) for secret encryption');
+    throw new Error('Missing APP_ENCRYPTION_KEY (or JWT_SECRET in development) for secret encryption');
   }
 
   cachedEncryptionKey = createHash('sha256').update(keySource).digest();

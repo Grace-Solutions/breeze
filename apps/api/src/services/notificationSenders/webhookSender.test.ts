@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   sendWebhookNotification,
   validateWebhookConfig,
-  validateWebhookUrlSafety
+  validateWebhookUrlSafety,
+  redactUrlForLogs
 } from './webhookSender';
 
 describe('webhook sender safety', () => {
@@ -44,5 +45,31 @@ describe('webhook sender safety', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
+  });
+});
+
+describe('redactUrlForLogs', () => {
+  it('strips query params and credentials', () => {
+    expect(redactUrlForLogs('https://user:pass@example.com/hook?secret=abc'))
+      .toBe('https://example.com/hook');
+  });
+
+  it('preserves path without sensitive parts', () => {
+    expect(redactUrlForLogs('https://example.com/webhook/v2'))
+      .toBe('https://example.com/webhook/v2');
+  });
+
+  it('returns [invalid-url] for garbage input', () => {
+    expect(redactUrlForLogs('not-a-url')).toBe('[invalid-url]');
+  });
+
+  it('preserves port numbers', () => {
+    expect(redactUrlForLogs('https://example.com:8443/hook'))
+      .toBe('https://example.com:8443/hook');
+  });
+
+  it('strips hash fragments', () => {
+    expect(redactUrlForLogs('https://example.com/hook#section'))
+      .toBe('https://example.com/hook');
   });
 });

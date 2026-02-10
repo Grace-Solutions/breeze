@@ -213,6 +213,15 @@ function validateCookieCsrfRequest(c: Context): string | null {
     return 'Invalid request origin';
   }
 
+  // Defense-in-depth: block cross-site requests when the browser provides Sec-Fetch-Site
+  const fetchSite = c.req.header('sec-fetch-site');
+  if (fetchSite) {
+    const normalized = fetchSite.toLowerCase();
+    if (normalized !== 'same-origin' && normalized !== 'same-site') {
+      return 'Cross-site request blocked';
+    }
+  }
+
   return null;
 }
 

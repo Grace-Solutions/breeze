@@ -14,10 +14,22 @@ type OriginResolverOptions = {
   defaultOrigins?: string[];
 };
 
-export function createCorsOriginResolver(options: OriginResolverOptions = {}): (origin?: string) => string {
+export function shouldIncludeDefaultOrigins(nodeEnv: string): boolean {
+  if (nodeEnv !== 'production') return true;
+  const flag = (process.env.CORS_INCLUDE_DEFAULT_ORIGINS ?? '').trim().toLowerCase();
+  return flag === 'true' || flag === '1' || flag === 'yes';
+}
+
+export function createCorsOriginResolver(options: OriginResolverOptions = {}): (origin?: string) => string | null {
+  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+
+  const includeDefaults = options.defaultOrigins
+    ? options.defaultOrigins.length > 0
+    : shouldIncludeDefaultOrigins(nodeEnv);
+
   const defaultOrigins = options.defaultOrigins && options.defaultOrigins.length > 0
     ? options.defaultOrigins
-    : [...DEFAULT_ALLOWED_ORIGINS];
+    : includeDefaults ? [...DEFAULT_ALLOWED_ORIGINS] : [];
 
   const configuredOrigins = (options.configuredOriginsRaw ?? '')
     .split(',')
@@ -29,10 +41,10 @@ export function createCorsOriginResolver(options: OriginResolverOptions = {}): (
     ...configuredOrigins
   ]);
 
-  const nodeEnv = options.nodeEnv ?? process.env.NODE_ENV ?? 'development';
+  return (origin?: string): string | null => {
+    // No origin header → return null (do not emit ACAO header)
+    if (!origin) return null;
 
-  return (origin?: string): string => {
-    if (!origin) return defaultOrigins[0];
     if (allowedOrigins.has(origin)) return origin;
 
     if (nodeEnv !== 'production') {
@@ -42,10 +54,10 @@ export function createCorsOriginResolver(options: OriginResolverOptions = {}): (
           return origin;
         }
       } catch {
-        // fall through to default origin
+        // fall through
       }
     }
 
-    return defaultOrigins[0];
+    return null;
   };
 }

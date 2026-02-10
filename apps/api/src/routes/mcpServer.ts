@@ -25,8 +25,29 @@ import { devices, alerts, scripts, automations } from '../db/schema';
 import { eq, and, desc, type SQL } from 'drizzle-orm';
 import type { AuthContext } from '../middleware/auth';
 import { writeAuditEvent } from '../services/auditEvents';
+import { getRedis } from '../services/redis';
+import { rateLimiter } from '../services/rate-limit';
 
 export const mcpServerRoutes = new Hono();
+
+function parseCsvSet(raw: string | undefined): Set<string> {
+  if (!raw) return new Set();
+  return new Set(raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0));
+}
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const mcpExecuteToolAllowlist = parseCsvSet(process.env.MCP_EXECUTE_TOOL_ALLOWLIST);
+
+function isExecuteToolAllowedInProd(toolName: string): boolean {
+  if (mcpExecuteToolAllowlist.size === 0) return false;
+  return mcpExecuteToolAllowlist.has('*') || mcpExecuteToolAllowlist.has(toolName);
+}
 
 // All MCP routes require API key auth
 mcpServerRoutes.use('*', apiKeyAuthMiddleware);
@@ -72,6 +93,21 @@ mcpServerRoutes.get(
   requireApiKeyScope('ai:read'),
   async (c) => {
     const apiKey = c.get('apiKey');
+
+    // Rate limit SSE connections in production
+    if (process.env.NODE_ENV === 'production') {
+      const redis = getRedis();
+      if (!redis) {
+        return c.json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Service temporarily unavailable' } }, 503);
+      }
+      const limit = envInt('MCP_SSE_RATE_LIMIT_PER_MINUTE', 30);
+      const rate = await rateLimiter(redis, `mcp:sse:${apiKey.id}`, limit, 60);
+      if (!rate.allowed) {
+        const retryAfter = Math.max(1, Math.ceil((rate.resetAt.getTime() - Date.now()) / 1000));
+        c.header('Retry-After', String(retryAfter));
+        return c.json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Rate limit exceeded' } }, 429);
+      }
+    }
 
     // Cleanup stale sessions
     const now = Date.now();
@@ -151,6 +187,23 @@ mcpServerRoutes.post(
   '/message',
   requireApiKeyScope('ai:read'),
   async (c) => {
+    const apiKey = c.get('apiKey');
+
+    // Rate limit messages in production
+    if (process.env.NODE_ENV === 'production') {
+      const redis = getRedis();
+      if (!redis) {
+        return c.json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Service temporarily unavailable' } }, 503);
+      }
+      const limit = envInt('MCP_MESSAGE_RATE_LIMIT_PER_MINUTE', 120);
+      const rate = await rateLimiter(redis, `mcp:msg:${apiKey.id}`, limit, 60);
+      if (!rate.allowed) {
+        const retryAfter = Math.max(1, Math.ceil((rate.resetAt.getTime() - Date.now()) / 1000));
+        c.header('Retry-After', String(retryAfter));
+        return c.json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Rate limit exceeded' } }, 429);
+      }
+    }
+
     const sessionId = c.req.query('sessionId');
 
     let body: JsonRpcRequest;
@@ -173,7 +226,6 @@ mcpServerRoutes.post(
     }
 
     // Build a minimal AuthContext from the API key
-    const apiKey = c.get('apiKey');
     const auth = buildAuthFromApiKey(apiKey);
 
     const response = await handleJsonRpc(body, auth, apiKey.scopes);
@@ -321,6 +373,11 @@ async function handleToolsCall(
   }
   if (tier === 2 && !hasWrite) {
     return jsonRpcError(id, -32603, `Tool "${toolName}" requires ai:write scope`);
+  }
+
+  // In production, enforce tool allowlist for tier 3+ (destructive) tools
+  if (tier >= 3 && process.env.NODE_ENV === 'production' && !isExecuteToolAllowedInProd(toolName)) {
+    return jsonRpcError(id, -32603, `Tool "${toolName}" is not in MCP_EXECUTE_TOOL_ALLOWLIST for production`);
   }
 
   // Check guardrails

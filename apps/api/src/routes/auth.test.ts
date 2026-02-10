@@ -928,4 +928,141 @@ describe('auth routes', () => {
       expect(revokeAllUserTokens).toHaveBeenCalledWith('user-123');
     });
   });
+
+  describe('sec-fetch-site validation on /auth/refresh', () => {
+    it('should block cross-site requests with sec-fetch-site: cross-site', async () => {
+      const res = await app.request('/auth/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-breeze-csrf': '1',
+          'sec-fetch-site': 'cross-site',
+          Cookie: 'breeze_refresh_token=some-token'
+        }
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain('Cross-site request blocked');
+    });
+
+    it('should block requests with sec-fetch-site: none', async () => {
+      const res = await app.request('/auth/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-breeze-csrf': '1',
+          'sec-fetch-site': 'none',
+          Cookie: 'breeze_refresh_token=some-token'
+        }
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain('Cross-site request blocked');
+    });
+
+    it('should allow same-origin requests', async () => {
+      vi.mocked(verifyToken).mockResolvedValue({
+        sub: 'user-123',
+        email: 'test@example.com',
+        roleId: null,
+        orgId: null,
+        partnerId: null,
+        scope: 'system',
+        type: 'refresh',
+        iat: 123456,
+        jti: 'refresh-jti-sec'
+      });
+      vi.mocked(db.select)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([{
+                id: 'user-123',
+                email: 'test@example.com',
+                status: 'active'
+              }])
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([])
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([])
+            })
+          })
+        } as any);
+
+      const res = await app.request('/auth/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-breeze-csrf': '1',
+          'sec-fetch-site': 'same-origin',
+          Cookie: 'breeze_refresh_token=valid-refresh-token'
+        }
+      });
+
+      expect(res.status).toBe(200);
+    });
+
+    it('should allow requests without sec-fetch-site header (non-browser clients)', async () => {
+      vi.mocked(verifyToken).mockResolvedValue({
+        sub: 'user-123',
+        email: 'test@example.com',
+        roleId: null,
+        orgId: null,
+        partnerId: null,
+        scope: 'system',
+        type: 'refresh',
+        iat: 123456,
+        jti: 'refresh-jti-no-sec'
+      });
+      vi.mocked(db.select)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([{
+                id: 'user-123',
+                email: 'test@example.com',
+                status: 'active'
+              }])
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([])
+            })
+          })
+        } as any)
+        .mockReturnValueOnce({
+          from: vi.fn().mockReturnValue({
+            where: vi.fn().mockReturnValue({
+              limit: vi.fn().mockResolvedValue([])
+            })
+          })
+        } as any);
+
+      const res = await app.request('/auth/refresh', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-breeze-csrf': '1',
+          Cookie: 'breeze_refresh_token=valid-refresh-token'
+        }
+      });
+
+      expect(res.status).toBe(200);
+    });
+  });
 });

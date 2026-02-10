@@ -19,6 +19,8 @@ import { writeAuditEvent } from '../services/auditEvents';
 import { getTrustedClientIp } from '../services/clientIp';
 import { getEmailService } from '../services/email';
 import { DEFAULT_ALLOWED_ORIGINS } from '../services/corsOrigins';
+import { getRedis } from '../services/redis';
+import { rateLimiter } from '../services/rate-limit';
 
 export const portalRoutes = new Hono();
 
@@ -70,6 +72,18 @@ const RATE_LIMIT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const PORTAL_SESSION_COOKIE_NAME = 'breeze_portal_session';
 const PORTAL_SESSION_COOKIE_PATH = '/api/v1/portal';
 const CSRF_HEADER_NAME = 'x-breeze-csrf';
+const RESET_TTL_SECONDS = Math.floor(RESET_TTL_MS / 1000);
+
+const PORTAL_USE_REDIS =
+  process.env.PORTAL_STATE_BACKEND === 'redis' || process.env.NODE_ENV === 'production';
+
+const PORTAL_REDIS_KEYS = {
+  session: (token: string) => `portal:session:${token}`,
+  userSessions: (userId: string) => `portal:user-sessions:${userId}`,
+  resetToken: (hash: string) => `portal:reset:${hash}`,
+  rlAttempts: (key: string) => `portal:rl:attempts:${key}`,
+  rlBlock: (key: string) => `portal:rl:block:${key}`,
+};
 
 const LOGIN_RATE_LIMIT = {
   windowMs: 5 * 60 * 1000,
@@ -199,11 +213,43 @@ function sweepRateLimitBuckets(nowMs: number = Date.now()) {
   capMapByOldest(portalRateLimitBuckets, PORTAL_RATE_BUCKET_CAP, (bucket) => bucket.lastSeenAtMs);
 }
 
-function checkRateLimit(
+async function checkRateLimit(
   key: string,
   config: { windowMs: number; maxAttempts: number; blockMs: number },
   nowMs: number = Date.now()
-) {
+): Promise<{ allowed: boolean; retryAfterSeconds: number }> {
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (!redis) {
+      // Fail closed in production, fail open in dev
+      if (process.env.NODE_ENV === 'production') {
+        return { allowed: false, retryAfterSeconds: 60 };
+      }
+      return { allowed: true, retryAfterSeconds: 0 };
+    }
+
+    const blockKey = PORTAL_REDIS_KEYS.rlBlock(key);
+    const blockTtl = await redis.ttl(blockKey);
+    if (blockTtl > 0) {
+      return { allowed: false, retryAfterSeconds: blockTtl };
+    }
+
+    const attemptsKey = PORTAL_REDIS_KEYS.rlAttempts(key);
+    const windowSeconds = Math.ceil(config.windowMs / 1000);
+    const count = await redis.incr(attemptsKey);
+    if (count === 1) {
+      await redis.expire(attemptsKey, windowSeconds);
+    }
+
+    if (count > config.maxAttempts) {
+      const blockSeconds = Math.ceil(config.blockMs / 1000);
+      await redis.setex(blockKey, blockSeconds, '1');
+      return { allowed: false, retryAfterSeconds: blockSeconds };
+    }
+
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
   sweepRateLimitBuckets(nowMs);
 
   let bucket = portalRateLimitBuckets.get(key);
@@ -223,7 +269,7 @@ function checkRateLimit(
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil((bucket.blockedUntilMs - nowMs) / 1000))
-    } as const;
+    };
   }
 
   bucket.count += 1;
@@ -236,15 +282,28 @@ function checkRateLimit(
     return {
       allowed: false,
       retryAfterSeconds: Math.max(1, Math.ceil(config.blockMs / 1000))
-    } as const;
+    };
   }
 
   portalRateLimitBuckets.set(key, bucket);
   capMapByOldest(portalRateLimitBuckets, PORTAL_RATE_BUCKET_CAP, (entry) => entry.lastSeenAtMs);
-  return { allowed: true, retryAfterSeconds: 0 } as const;
+  return { allowed: true, retryAfterSeconds: 0 };
 }
 
-function clearRateLimitKeys(keys: string[]) {
+async function clearRateLimitKeys(keys: string[]) {
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (redis) {
+      const redisKeys = keys.flatMap((k) => [
+        PORTAL_REDIS_KEYS.rlAttempts(k),
+        PORTAL_REDIS_KEYS.rlBlock(k),
+      ]);
+      if (redisKeys.length > 0) {
+        await redis.del(...redisKeys);
+      }
+    }
+    return;
+  }
   for (const key of keys) {
     portalRateLimitBuckets.delete(key);
   }
@@ -343,16 +402,39 @@ async function portalAuthMiddleware(c: Context, next: Next) {
     return c.json({ error: 'Missing or invalid authorization header' }, 401);
   }
 
-  const session = portalSessions.get(token);
-  if (!session) {
-    if (cookieToken) {
-      c.header('Set-Cookie', buildClearPortalSessionCookie(), { append: true });
+  let sessionData: { portalUserId: string; orgId: string } | null = null;
+
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (!redis) {
+      if (process.env.NODE_ENV === 'production') {
+        return c.json({ error: 'Service temporarily unavailable' }, 503);
+      }
+      // Fall through to in-memory in non-production
+    } else {
+      const raw = await redis.get(PORTAL_REDIS_KEYS.session(token));
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          sessionData = { portalUserId: parsed.portalUserId, orgId: parsed.orgId };
+        } catch (err) {
+          console.error('[portal] Failed to parse Redis session data:', (err as Error).message);
+        }
+      }
     }
-    return c.json({ error: 'Invalid or expired session' }, 401);
   }
 
-  if (session.expiresAt.getTime() <= Date.now()) {
-    portalSessions.delete(token);
+  if (!sessionData) {
+    // Try in-memory fallback (for non-Redis mode or dev with Redis unavailable)
+    const session = portalSessions.get(token);
+    if (session && session.expiresAt.getTime() > Date.now()) {
+      sessionData = { portalUserId: session.portalUserId, orgId: session.orgId };
+    } else if (session) {
+      portalSessions.delete(token);
+    }
+  }
+
+  if (!sessionData) {
     if (cookieToken) {
       c.header('Set-Cookie', buildClearPortalSessionCookie(), { append: true });
     }
@@ -369,10 +451,14 @@ async function portalAuthMiddleware(c: Context, next: Next) {
       status: portalUsers.status
     })
     .from(portalUsers)
-    .where(and(eq(portalUsers.id, session.portalUserId), eq(portalUsers.orgId, session.orgId)))
+    .where(and(eq(portalUsers.id, sessionData.portalUserId), eq(portalUsers.orgId, sessionData.orgId)))
     .limit(1);
 
   if (!user) {
+    if (PORTAL_USE_REDIS) {
+      const redis = getRedis();
+      if (redis) await redis.del(PORTAL_REDIS_KEYS.session(token));
+    }
     portalSessions.delete(token);
     if (cookieToken) {
       c.header('Set-Cookie', buildClearPortalSessionCookie(), { append: true });
@@ -552,7 +638,7 @@ portalRoutes.post('/auth/login', zValidator('json', loginSchema), async (c) => {
   const accountRateKey = `portal:login:account:${orgId ?? 'any'}:${normalizedEmail}`;
 
   for (const rateKey of [ipRateKey, accountRateKey]) {
-    const rate = checkRateLimit(rateKey, LOGIN_RATE_LIMIT);
+    const rate = await checkRateLimit(rateKey, LOGIN_RATE_LIMIT);
     if (!rate.allowed) {
       c.header('Retry-After', String(rate.retryAfterSeconds));
       return c.json({ error: 'Too many login attempts. Please try again later.' }, 429);
@@ -600,6 +686,31 @@ portalRoutes.post('/auth/login', zValidator('json', loginSchema), async (c) => {
   const token = nanoid(48);
   const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
 
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (redis) {
+      const sessionPayload = JSON.stringify({
+        portalUserId: user.id,
+        orgId: user.orgId,
+        createdAt: now.toISOString(),
+      });
+      const results = await redis
+        .multi()
+        .setex(PORTAL_REDIS_KEYS.session(token), SESSION_TTL_SECONDS, sessionPayload)
+        .sadd(PORTAL_REDIS_KEYS.userSessions(user.id), token)
+        .expire(PORTAL_REDIS_KEYS.userSessions(user.id), SESSION_TTL_SECONDS * 2)
+        .exec();
+      if (results) {
+        for (const [err] of results) {
+          if (err) {
+            console.error('[portal] Redis session pipeline error:', err.message);
+          }
+        }
+      }
+    }
+  }
+
+  // Always store in-memory as fallback
   portalSessions.set(token, {
     token,
     portalUserId: user.id,
@@ -615,7 +726,7 @@ portalRoutes.post('/auth/login', zValidator('json', loginSchema), async (c) => {
     .where(eq(portalUsers.id, user.id));
 
   const resolvedAccountRateKey = `portal:login:account:${user.orgId}:${normalizedEmail}`;
-  clearRateLimitKeys([ipRateKey, accountRateKey, resolvedAccountRateKey]);
+  await clearRateLimitKeys([ipRateKey, accountRateKey, resolvedAccountRateKey]);
 
   c.header('Set-Cookie', buildPortalSessionCookie(token), { append: true });
 
@@ -640,7 +751,7 @@ portalRoutes.post('/auth/forgot-password', zValidator('json', forgotPasswordSche
   const accountRateKey = `portal:forgot:account:${orgId ?? 'any'}:${normalizedEmail}`;
 
   for (const rateKey of [ipRateKey, accountRateKey]) {
-    const rate = checkRateLimit(rateKey, FORGOT_PASSWORD_RATE_LIMIT);
+    const rate = await checkRateLimit(rateKey, FORGOT_PASSWORD_RATE_LIMIT);
     if (!rate.allowed) {
       c.header('Retry-After', String(rate.retryAfterSeconds));
       return c.json({ error: 'Too many password reset attempts. Please try again later.' }, 429);
@@ -661,6 +772,17 @@ portalRoutes.post('/auth/forgot-password', zValidator('json', forgotPasswordSche
     const resetToken = nanoid(48);
     const tokenHash = createHash('sha256').update(resetToken).digest('hex');
     const expiresAt = new Date(Date.now() + RESET_TTL_MS);
+
+    if (PORTAL_USE_REDIS) {
+      const redis = getRedis();
+      if (redis) {
+        await redis.setex(
+          PORTAL_REDIS_KEYS.resetToken(tokenHash),
+          RESET_TTL_SECONDS,
+          JSON.stringify({ userId: user.id })
+        );
+      }
+    }
     portalResetTokens.set(tokenHash, { userId: user.id, expiresAt, createdAt: new Date() });
     capMapByOldest(portalResetTokens, PORTAL_RESET_TOKEN_CAP, (token) => token.createdAt.getTime());
 
@@ -696,7 +818,7 @@ portalRoutes.post('/auth/reset-password', zValidator('json', resetPasswordSchema
   const tokenRateKey = `portal:reset:token:${tokenHash}`;
 
   for (const rateKey of [ipRateKey, tokenRateKey]) {
-    const rate = checkRateLimit(rateKey, RESET_PASSWORD_RATE_LIMIT);
+    const rate = await checkRateLimit(rateKey, RESET_PASSWORD_RATE_LIMIT);
     if (!rate.allowed) {
       c.header('Retry-After', String(rate.retryAfterSeconds));
       return c.json({ error: 'Too many password reset attempts. Please try again later.' }, 429);
@@ -708,10 +830,35 @@ portalRoutes.post('/auth/reset-password', zValidator('json', resetPasswordSchema
     return c.json({ error: passwordCheck.errors[0] }, 400);
   }
 
-  const stored = portalResetTokens.get(tokenHash);
+  // Look up reset token — try Redis first, then in-memory
+  let storedUserId: string | null = null;
 
-  if (!stored || stored.expiresAt.getTime() <= Date.now()) {
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (redis) {
+      const raw = await redis.get(PORTAL_REDIS_KEYS.resetToken(tokenHash));
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          storedUserId = parsed.userId;
+        } catch (err) {
+          console.error('[portal] Failed to parse Redis reset token data:', (err as Error).message);
+        }
+        // Consume the token (single-use)
+        await redis.del(PORTAL_REDIS_KEYS.resetToken(tokenHash));
+      }
+    }
+  }
+
+  if (!storedUserId) {
+    const stored = portalResetTokens.get(tokenHash);
+    if (stored && stored.expiresAt.getTime() > Date.now()) {
+      storedUserId = stored.userId;
+    }
     portalResetTokens.delete(tokenHash);
+  }
+
+  if (!storedUserId) {
     return c.json({ error: 'Invalid or expired reset token' }, 400);
   }
 
@@ -721,14 +868,25 @@ portalRoutes.post('/auth/reset-password', zValidator('json', resetPasswordSchema
   await db
     .update(portalUsers)
     .set({ passwordHash, updatedAt: now })
-    .where(eq(portalUsers.id, stored.userId));
+    .where(eq(portalUsers.id, storedUserId));
 
-  clearRateLimitKeys([ipRateKey, tokenRateKey]);
+  await clearRateLimitKeys([ipRateKey, tokenRateKey]);
 
-  portalResetTokens.delete(tokenHash);
+  // Invalidate all sessions for this user
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (redis) {
+      const indexKey = PORTAL_REDIS_KEYS.userSessions(storedUserId);
+      const tokens = await redis.smembers(indexKey);
+      if (tokens.length > 0) {
+        await redis.del(...tokens.map((t) => PORTAL_REDIS_KEYS.session(t)));
+      }
+      await redis.del(indexKey);
+    }
+  }
 
   for (const [sessionToken, session] of portalSessions.entries()) {
-    if (session.portalUserId === stored.userId) {
+    if (session.portalUserId === storedUserId) {
       portalSessions.delete(sessionToken);
     }
   }
@@ -743,6 +901,16 @@ portalRoutes.post('/auth/logout', portalAuthMiddleware, async (c) => {
   }
 
   const auth = c.get('portalAuth');
+
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (!redis) {
+      return c.json({ error: 'Service temporarily unavailable' }, 503);
+    }
+    await redis.del(PORTAL_REDIS_KEYS.session(auth.token));
+    await redis.srem(PORTAL_REDIS_KEYS.userSessions(auth.user.id), auth.token);
+  }
+
   portalSessions.delete(auth.token);
   c.header('Set-Cookie', buildClearPortalSessionCookie(), { append: true });
   return c.json({ success: true });
@@ -1306,6 +1474,19 @@ portalRoutes.post('/profile/password', zValidator('json', changePasswordSchema),
       updatedAt: new Date()
     })
     .where(eq(portalUsers.id, auth.user.id));
+
+  // Invalidate all sessions for this user (Redis + in-memory)
+  if (PORTAL_USE_REDIS) {
+    const redis = getRedis();
+    if (redis) {
+      const indexKey = PORTAL_REDIS_KEYS.userSessions(auth.user.id);
+      const tokens = await redis.smembers(indexKey);
+      if (tokens.length > 0) {
+        await redis.del(...tokens.map((t) => PORTAL_REDIS_KEYS.session(t)));
+      }
+      await redis.del(indexKey);
+    }
+  }
 
   for (const [sessionToken, session] of portalSessions.entries()) {
     if (session.portalUserId === auth.user.id) {

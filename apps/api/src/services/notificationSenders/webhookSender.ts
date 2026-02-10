@@ -8,6 +8,19 @@
 import { isIP } from 'net';
 import { lookup } from 'dns/promises';
 
+export function redactUrlForLogs(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    parsed.username = '';
+    parsed.password = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '[invalid-url]';
+  }
+}
+
 export interface WebhookNotificationPayload {
   alertId: string;
   alertName: string;
@@ -291,7 +304,7 @@ export async function sendWebhookNotification(
     }
   }
 
-  console.error(`[WebhookSender] Failed to send to ${config.url}: ${lastError}`);
+  console.error(`[WebhookSender] Failed to send to ${redactUrlForLogs(config.url)}: ${lastError}`);
 
   return {
     success: false,
