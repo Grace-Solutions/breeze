@@ -38,6 +38,17 @@ The Breeze Agent is a lightweight, cross-platform monitoring and management agen
 | macOS | x64 (Intel), ARM64 (Apple Silicon) | macOS 11 (Big Sur)+ |
 | Linux | x64, ARM64 | Kernel 4.15+ (Ubuntu 18.04+, RHEL 8+, Debian 10+) |
 
+## Building from Source
+
+If self-hosting, build the agent from the repository:
+
+```bash
+cd agent
+make build-all    # Builds for macOS, Windows, and Linux
+```
+
+Binaries will be output to `agent/bin/`.
+
 ---
 
 ## System Requirements
@@ -317,7 +328,7 @@ sudo mkdir -p /var/lib/breeze
 sudo tee /etc/systemd/system/breeze-agent.service > /dev/null << 'EOF'
 [Unit]
 Description=Breeze RMM Agent
-Documentation=https://docs.breeze.io
+Documentation=https://github.com/lanternops/breeze
 After=network-online.target
 Wants=network-online.target
 
@@ -1066,6 +1077,6 @@ Use "breeze-agent [command] --help" for more information about a command.
 
 ---
 
-For additional documentation, visit: https://docs.breeze.io
+For additional documentation, visit your Breeze instance URL or the project repository.
 
-For support, contact: support@breeze.io
+For support, contact your administrator.

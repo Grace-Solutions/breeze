@@ -129,7 +129,7 @@ Partner (MSP)
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/breeze.git
+git clone https://github.com/lanternops/breeze.git
 cd breeze
 
 # Install dependencies
@@ -168,7 +168,7 @@ MINIO_SECRET_KEY=minioadmin
 **1. Start infrastructure services:**
 
 ```bash
-docker-compose -f docker/docker-compose.yml up -d
+docker compose up -d
 ```
 
 This starts:
@@ -1381,7 +1381,7 @@ refactor(db): extract pagination helper function
 
 ## Additional Resources
 
-- [Project Status](./PROJECT_STATUS.md) - Current implementation status
+- See the GitHub Issues and project board for current status
 - [Architecture](./architecture.md) - Detailed architecture specification
 - [Hono Documentation](https://hono.dev/)
 - [Drizzle ORM Documentation](https://orm.drizzle.team/)

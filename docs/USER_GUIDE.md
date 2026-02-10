@@ -1,5 +1,7 @@
 # Breeze RMM User Guide
 
+> **Note: Screenshots are being updated and may not display correctly.**
+
 Welcome to Breeze RMM, your modern Remote Monitoring and Management platform. This guide will help you get started and make the most of all the features available to manage your IT infrastructure.
 
 ---

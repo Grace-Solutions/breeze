@@ -1516,5 +1516,5 @@ When contacting support, provide:
 
 ---
 
-*Last updated: January 2024*
+*Last updated: February 2026*
 *Breeze RMM Documentation*

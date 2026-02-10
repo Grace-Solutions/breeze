@@ -22,7 +22,7 @@
 <p align="center">
   <a href="https://github.com/lanternops/breeze/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License" /></a>
   <a href="https://github.com/lanternops/breeze/releases"><img src="https://img.shields.io/github/v/release/lanternops/breeze" alt="Release" /></a>
-  <a href="https://breezermm.com/discord"><img src="https://img.shields.io/discord/000000000?label=discord" alt="Discord" /></a>
+  <a href="https://breezermm.com/discord"><img src="https://img.shields.io/badge/discord-join-7289da" alt="Discord" /></a>
 </p>
 
 ---
@@ -92,12 +92,22 @@ cd breeze
 # Copy and configure environment
 cp .env.example .env
 # Edit .env with your database credentials and settings
+# REQUIRED: Generate real secrets for these values
+# JWT_SECRET: openssl rand -base64 64
+# AGENT_ENROLLMENT_SECRET: openssl rand -hex 32
+# APP_ENCRYPTION_KEY: openssl rand -hex 32
 
 # Start everything
 docker compose up -d
+
+# Push the database schema
+pnpm db:push
+
+# Seed default roles and permissions
+pnpm db:seed
 ```
 
-Breeze will be running at `http://localhost:3000`.
+Breeze will be running at `http://localhost:4321`.
 
 ### Install the Agent
 
@@ -106,14 +116,12 @@ From your Breeze dashboard, navigate to **Settings → Agents → Download** to 
 Or install directly:
 
 ```bash
-# macOS
-curl -fsSL https://your-breeze-instance/api/agent/install/macos | bash
+# Build from source
+cd agent
+make build
 
-# Windows (PowerShell, run as Administrator)
-irm https://your-breeze-instance/api/agent/install/windows | iex
-
-# Linux
-curl -fsSL https://your-breeze-instance/api/agent/install/linux | bash
+# The binary will be at agent/bin/breeze-agent
+# See docs/AGENT_INSTALLATION.md for enrollment instructions
 ```
 
 ### Enable the AI Brain (Optional)
@@ -301,7 +309,7 @@ cd breeze
 pnpm install
 
 # Set up the database
-pnpm db:migrate
+pnpm db:push
 
 # Start the dev server
 pnpm dev
@@ -322,7 +330,7 @@ go build -o breeze-agent ./cmd/agent
 
 ### Community
 
-- [Discord](https://discord.gg/breeze-rmm) — Chat with the team and other MSPs
+- [Discord](https://breezermm.com/discord) — Chat with the team and other MSPs
 - [GitHub Discussions](https://github.com/lanternops/breeze/discussions) — Feature requests and ideas
 - [Twitter/X](https://twitter.com/breeze_rmm) — Updates and announcements
 
@@ -346,7 +354,7 @@ Absolutely. The multi-tenant hierarchy works for internal IT too — just use Or
 Breeze uses the Claude Agent SDK (Anthropic). BYOK mode requires an Anthropic API key. We chose Claude for its tool-use capabilities and reasoning quality. We're open to community contributions for other model support.
 
 **Is my data safe?**
-Self-hosted: your data never leaves your infrastructure. Cloud-hosted: data is isolated per partner with strict tenant separation. See [docs/security.md](docs/security.md) for details.
+Self-hosted: your data never leaves your infrastructure. Cloud-hosted: data is isolated per partner with strict tenant separation. See our security practices in the [Admin Guide](docs/ADMIN_GUIDE.md).
 
 ---
 

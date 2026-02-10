@@ -21,6 +21,7 @@
     "db:push": "drizzle-kit push",
     "db:migrate": "tsx src/db/migrate.ts",
     "db:migrate:sql": "tsx src/db/migrations/run.ts",
+    "db:seed": "tsx src/db/seed.ts",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {

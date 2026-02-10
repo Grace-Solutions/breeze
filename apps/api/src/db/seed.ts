@@ -1,6 +1,7 @@
 import { db } from './index';
-import { roles, permissions, rolePermissions, scripts, alertTemplates } from './schema';
+import { roles, permissions, rolePermissions, scripts, alertTemplates, partners, organizations, sites, users, partnerUsers } from './schema';
 import { eq, and } from 'drizzle-orm';
+import { hashPassword } from '../services/password';
 
 // Default permissions
 const DEFAULT_PERMISSIONS = [
@@ -615,11 +616,155 @@ export async function seedEventLogAlertTemplates() {
   console.log('Event log alert templates seeded.');
 }
 
+export async function seedDefaultAdmin() {
+  console.log('Seeding default admin user...');
+
+  const adminEmail = 'admin@breeze.local';
+  const adminPassword = 'BreezeAdmin123!';
+
+  // Check if admin user already exists
+  const [existingUser] = await db
+    .select()
+    .from(users)
+    .where(eq(users.email, adminEmail))
+    .limit(1);
+
+  if (existingUser) {
+    console.log('  Admin user already exists, skipping.');
+    return;
+  }
+
+  // Create default partner
+  let partnerId: string;
+  const [existingPartner] = await db
+    .select()
+    .from(partners)
+    .where(eq(partners.slug, 'default-partner'))
+    .limit(1);
+
+  if (existingPartner) {
+    partnerId = existingPartner.id;
+    console.log('  Default partner already exists.');
+  } else {
+    const [newPartner] = await db
+      .insert(partners)
+      .values({
+        name: 'Default Partner',
+        slug: 'default-partner',
+        type: 'msp',
+        plan: 'enterprise'
+      })
+      .returning();
+    partnerId = newPartner!.id;
+    console.log('  Created default partner.');
+  }
+
+  // Create default organization
+  let orgId: string;
+  const [existingOrg] = await db
+    .select()
+    .from(organizations)
+    .where(
+      and(
+        eq(organizations.slug, 'default-organization'),
+        eq(organizations.partnerId, partnerId)
+      )
+    )
+    .limit(1);
+
+  if (existingOrg) {
+    orgId = existingOrg.id;
+    console.log('  Default organization already exists.');
+  } else {
+    const [newOrg] = await db
+      .insert(organizations)
+      .values({
+        partnerId,
+        name: 'Default Organization',
+        slug: 'default-organization',
+        type: 'customer',
+        status: 'active'
+      })
+      .returning();
+    orgId = newOrg!.id;
+    console.log('  Created default organization.');
+  }
+
+  // Create default site
+  const [existingSite] = await db
+    .select()
+    .from(sites)
+    .where(
+      and(
+        eq(sites.name, 'Default Site'),
+        eq(sites.orgId, orgId)
+      )
+    )
+    .limit(1);
+
+  if (existingSite) {
+    console.log('  Default site already exists.');
+  } else {
+    await db.insert(sites).values({
+      orgId,
+      name: 'Default Site',
+      timezone: 'UTC'
+    });
+    console.log('  Created default site.');
+  }
+
+  // Find the Partner Admin role
+  const [partnerAdminRole] = await db
+    .select()
+    .from(roles)
+    .where(
+      and(
+        eq(roles.name, 'Partner Admin'),
+        eq(roles.isSystem, true)
+      )
+    )
+    .limit(1);
+
+  if (!partnerAdminRole) {
+    console.error('  Partner Admin role not found. Run seedRoles first.');
+    return;
+  }
+
+  // Hash the password
+  const passwordHash = await hashPassword(adminPassword);
+
+  // Create the admin user
+  const [adminUser] = await db
+    .insert(users)
+    .values({
+      email: adminEmail,
+      name: 'Breeze Admin',
+      passwordHash,
+      status: 'active'
+    })
+    .returning();
+
+  // Link the admin user to the partner with Partner Admin role
+  await db.insert(partnerUsers).values({
+    partnerId,
+    userId: adminUser!.id,
+    roleId: partnerAdminRole.id,
+    orgAccess: 'all'
+  });
+
+  console.log('');
+  console.log('Default admin created:');
+  console.log('  Email: admin@breeze.local');
+  console.log('  Password: BreezeAdmin123!');
+  console.log('  \u26A0\uFE0F  Change this password immediately after first login!');
+}
+
 export async function seed() {
   await seedPermissions();
   await seedRoles();
   await seedScripts();
   await seedEventLogAlertTemplates();
+  await seedDefaultAdmin();
   console.log('Database seeding complete.');
 }
 
