@@ -72,7 +72,7 @@ Breeze is free, open source (AGPL-3.0), and designed to be self-hosted or [cloud
 - **Risk-classified actions** — Every AI action is validated against a risk engine before execution. Dangerous actions require human approval. Always.
 - **Bring your own key** — Plug in your Anthropic API key and the brain works out of the box
 
-> **🧠 [LanternOps Brain](https://lanternops.com)** — Want persistent memory, cross-tenant intelligence, automated playbooks, and compliance evidence generation? LanternOps is the managed AI brain for Breeze. Same RMM, smarter brain. [Learn more →](https://lanternops.com)
+> **🧠 [LanternOps Brain](https://lanternops.io)** — Want persistent memory, cross-tenant intelligence, automated playbooks, and compliance evidence generation? LanternOps is the managed AI brain for Breeze. Same RMM, smarter brain. [Learn more →](https://lanternops.io)
 
 ---
 
@@ -80,7 +80,7 @@ Breeze is free, open source (AGPL-3.0), and designed to be self-hosted or [cloud
 
 ### Option 1: Cloud Hosted (Easiest)
 
-Skip infrastructure entirely. [Sign up at LanternOps](https://lanternops.com) and have a fully managed Breeze instance in minutes.
+Skip infrastructure entirely. [Sign up at LanternOps](https://lanternops.io) and have a fully managed Breeze instance in minutes.
 
 ### Option 2: Self-Hosted (Docker)
 
@@ -342,7 +342,7 @@ go build -o breeze-agent ./cmd/agent
 Yes. Breeze is AGPL-3.0 licensed. Self-host it, use it in production, manage as many endpoints as you want. Free forever.
 
 **What's the catch?**
-No catch. The business model is [LanternOps](https://lanternops.com) — a managed AI brain that connects to Breeze and adds persistent memory, cross-tenant intelligence, automated playbooks, and compliance evidence. Breeze is great on its own. LanternOps makes it autonomous.
+No catch. The business model is [LanternOps](https://lanternops.io) — a managed AI brain that connects to Breeze and adds persistent memory, cross-tenant intelligence, automated playbooks, and compliance evidence. Breeze is great on its own. LanternOps makes it autonomous.
 
 **How is this different from Tactical RMM?**
 Tactical RMM is a solid project. Breeze is AI-native — the agent SDK and tool system are core to the architecture, not an integration. We also have built-in remote access (WebRTC), a modern frontend (Astro + React), and a multi-tenant hierarchy designed for MSPs from day one.
@@ -367,5 +367,5 @@ You can use, modify, and self-host Breeze freely. If you modify Breeze and offer
 ---
 
 <p align="center">
-  Built by <a href="https://lanternops.com">LanternOps</a> · Made for MSPs
+  Built by <a href="https://lanternops.io">LanternOps</a> · Made for MSPs
 </p>
