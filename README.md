@@ -288,8 +288,8 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 
 | Platform | Agent Status | Notes |
 |---|---|---|
-| macOS | ✅ Stable | Primary development platform |
-| Windows | ✅ Stable | Full feature parity with macOS |
+| macOS | ✅ Working | Primary development platform |
+| Windows | ✅ Working | Full feature parity with macOS |
 | Linux | 🧪 Built, testing | Core features working, looking for testers |
 
 ---
