@@ -14,7 +14,7 @@ import { agentRoutes } from './routes/agents';
 import { deviceRoutes } from './routes/devices';
 import { scriptRoutes } from './routes/scripts';
 import { scriptLibraryRoutes } from './routes/scriptLibrary';
-import { automationRoutes } from './routes/automations';
+import { automationRoutes, automationWebhookRoutes } from './routes/automations';
 import { alertRoutes } from './routes/alerts';
 import { alertTemplateRoutes } from './routes/alertTemplates';
 import { orgRoutes } from './routes/orgs';
@@ -72,11 +72,14 @@ import { initializeSnmpWorker } from './jobs/snmpWorker';
 import { initializeMonitorWorker } from './jobs/monitorWorker';
 import { initializeSnmpRetention } from './jobs/snmpRetention';
 import { initializePolicyEvaluationWorker } from './jobs/policyEvaluationWorker';
+import { initializeAutomationWorker } from './jobs/automationWorker';
+import { initializeSecurityPostureWorker } from './jobs/securityPostureWorker';
 import { initializePolicyAlertBridge } from './services/policyAlertBridge';
 import { getWebhookWorker, initializeWebhookDelivery } from './workers/webhookDelivery';
 import { initializeTransferCleanup } from './workers/transferCleanup';
 import { isRedisAvailable } from './services/redis';
 import { writeAuditEvent } from './services/auditEvents';
+import { createCorsOriginResolver } from './services/corsOrigins';
 import * as dbModule from './db';
 import { deviceGroups, devices, securityThreats, webhookDeliveries, webhooks as webhooksTable } from './db/schema';
 import { and, eq, sql } from 'drizzle-orm';
@@ -91,6 +94,10 @@ const app = new Hono();
 
 // Create WebSocket helpers (must be done before routes are registered)
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+const resolveCorsOrigin = createCorsOriginResolver({
+  configuredOriginsRaw: process.env.CORS_ALLOWED_ORIGINS,
+  nodeEnv: process.env.NODE_ENV
+});
 
 // Global middleware
 app.use('*', logger());
@@ -99,12 +106,9 @@ app.use('*', prettyJSON());
 app.use(
   '*',
   cors({
-    origin: (origin) => {
-      const allowedOrigins = ['http://localhost:4321', 'http://localhost:4322', 'http://localhost:1420', 'tauri://localhost'];
-      return allowedOrigins.includes(origin) ? origin : allowedOrigins[0];
-    },
+    origin: (origin) => resolveCorsOrigin(origin),
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-API-Key', 'X-Breeze-CSRF'],
     allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     exposeHeaders: ['Content-Length', 'X-Request-Id'],
     maxAge: 86400
@@ -423,6 +427,7 @@ api.route('/agents', agentRoutes);
 api.route('/devices', deviceRoutes);
 api.route('/scripts', scriptRoutes);
 api.route('/script-library', scriptLibraryRoutes);
+api.route('/automations/webhooks', automationWebhookRoutes);
 api.route('/automations', automationRoutes);
 api.route('/alerts', alertRoutes);
 api.route('/alert-templates', alertTemplateRoutes);
@@ -662,6 +667,8 @@ async function initializeWorkers(): Promise<void> {
     ['notificationDispatcher', initializeNotificationDispatcher],
     ['webhookDelivery', initializeWebhookDeliveryWorker],
     ['policyEvaluationWorker', initializePolicyEvaluationWorker],
+    ['automationWorker', initializeAutomationWorker],
+    ['securityPostureWorker', initializeSecurityPostureWorker],
     ['policyAlertBridge', initializePolicyAlertBridge],
     ['eventLogRetention', initializeEventLogRetention],
     ['discoveryWorker', initializeDiscoveryWorker],

@@ -236,19 +236,25 @@ function decryptMfaSecret(secret: string | null | undefined): string | null {
   if (!secret) return null;
   try {
     return decryptSecret(secret);
-  } catch {
+  } catch (error) {
+    console.error('[auth] Failed to decrypt MFA secret — user may need to re-enroll MFA:', error);
     return null;
   }
 }
 
 function getRecoveryCodePepper(): string {
-  return (
+  const pepper =
     process.env.MFA_RECOVERY_CODE_PEPPER
     || process.env.APP_ENCRYPTION_KEY
     || process.env.SECRET_ENCRYPTION_KEY
     || process.env.JWT_SECRET
-    || (process.env.NODE_ENV === 'test' ? 'test-mfa-recovery-code-pepper' : '')
-  );
+    || (process.env.NODE_ENV === 'test' ? 'test-mfa-recovery-code-pepper' : '');
+
+  if (!pepper && process.env.NODE_ENV === 'production') {
+    throw new Error('No MFA recovery code pepper configured. Set MFA_RECOVERY_CODE_PEPPER, APP_ENCRYPTION_KEY, SECRET_ENCRYPTION_KEY, or JWT_SECRET.');
+  }
+
+  return pepper;
 }
 
 function hashRecoveryCode(code: string): string {
@@ -586,7 +592,7 @@ authRoutes.post('/register-partner', zValidator('json', registerPartnerSchema), 
       .limit(1);
 
     if (existingUser.length > 0) {
-      return c.json({ error: 'An account with this email already exists' }, 400);
+      return c.json({ success: true, message: 'If registration can proceed, you will receive next steps shortly.' });
     }
 
     // Generate slug from company name
@@ -851,8 +857,12 @@ authRoutes.post('/login', zValidator('json', loginSchema), async (c) => {
 authRoutes.post('/logout', authMiddleware, async (c) => {
   const auth = c.get('auth');
 
-  await revokeAllUserTokens(auth.user.id);
-  await revokeCurrentRefreshTokenJti(c, auth.user.id);
+  try {
+    await revokeAllUserTokens(auth.user.id);
+    await revokeCurrentRefreshTokenJti(c, auth.user.id);
+  } catch (error) {
+    console.error('[auth] Failed to revoke tokens during logout — clearing cookie anyway:', error);
+  }
 
   if (auth.orgId) {
     createAuditLogAsync({
@@ -931,7 +941,11 @@ authRoutes.post('/refresh', async (c) => {
     scope: context.scope
   });
 
-  await revokeRefreshTokenJti(payload.jti);
+  try {
+    await revokeRefreshTokenJti(payload.jti);
+  } catch (error) {
+    console.error('[auth] Failed to revoke old refresh token JTI during rotation:', error);
+  }
   setRefreshTokenCookie(c, tokens.refreshToken);
   return c.json({ tokens: toPublicTokens(tokens) });
 });
@@ -1626,7 +1640,7 @@ authRoutes.post('/forgot-password', zValidator('json', forgotPasswordSchema), as
           resetUrl
         });
       } catch (error) {
-        console.error(`[Auth] Failed to send password reset email to ${user.email}:`, error);
+        console.error('[auth] Failed to send password reset email:', error);
       }
     } else {
       console.warn('[Auth] Email service not configured; password reset email was not sent');
@@ -1638,7 +1652,7 @@ authRoutes.post('/forgot-password', zValidator('json', forgotPasswordSchema), as
     }
   } else {
     // Log when password reset cannot be processed (user not found is expected, but Redis unavailability would be caught above)
-    console.warn(`Password reset requested for non-existent email: ${normalizedEmail}`);
+    console.warn('[auth] Password reset requested for non-existent account');
   }
 
   // Always return success
@@ -1682,9 +1696,13 @@ authRoutes.post('/reset-password', zValidator('json', resetPasswordSchema), asyn
   // Invalidate reset token
   await redis.del(`reset:${tokenHash}`);
 
-  // Invalidate all sessions
+  // Invalidate all sessions — best-effort; password is already changed above
   await invalidateAllUserSessions(userId);
-  await revokeAllUserTokens(userId);
+  try {
+    await revokeAllUserTokens(userId);
+  } catch (error) {
+    console.error('[auth] Failed to revoke tokens after password reset:', error);
+  }
 
   return c.json({ success: true, message: 'Password reset successfully' });
 });
@@ -1728,8 +1746,12 @@ authRoutes.post('/change-password', authMiddleware, zValidator('json', changePas
     .where(eq(users.id, auth.user.id));
 
   await invalidateAllUserSessions(auth.user.id);
-  await revokeAllUserTokens(auth.user.id);
-  await revokeCurrentRefreshTokenJti(c, auth.user.id);
+  try {
+    await revokeAllUserTokens(auth.user.id);
+    await revokeCurrentRefreshTokenJti(c, auth.user.id);
+  } catch (error) {
+    console.error('[auth] Failed to revoke tokens after password change:', error);
+  }
 
   return c.json({ success: true, message: 'Password changed successfully' });
 });

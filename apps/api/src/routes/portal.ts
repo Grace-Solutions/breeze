@@ -676,7 +676,7 @@ portalRoutes.post('/auth/forgot-password', zValidator('json', forgotPasswordSche
           resetUrl
         });
       } catch (error) {
-        console.error(`[PortalAuth] Failed to send password reset email to ${user.email}:`, error);
+        console.error('[portal] Failed to send password reset email:', error);
       }
     } else {
       console.warn('[PortalAuth] Email service not configured; password reset email was not sent');

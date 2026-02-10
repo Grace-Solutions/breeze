@@ -73,7 +73,8 @@ function decryptCredentials(value: string | null): Record<string, unknown> | nul
       return parsed as Record<string, unknown>;
     }
     return null;
-  } catch {
+  } catch (error) {
+    console.error('[psa] Failed to decrypt PSA connection credentials:', error);
     return null;
   }
 }

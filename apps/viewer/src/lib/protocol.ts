@@ -1,10 +1,10 @@
 /**
  * Parse breeze:// deep link URLs
- * Format: breeze://connect?session=xxx&token=xxx&api=xxx
+ * Format: breeze://connect?session=xxx&code=xxx&api=xxx
  */
 export interface ConnectionParams {
   sessionId: string;
-  token: string;
+  connectCode: string;
   apiUrl: string;
 }
 
@@ -14,14 +14,14 @@ export function parseDeepLink(url: string): ConnectionParams | null {
     const normalized = url.replace('breeze://', 'https://breeze/');
     const parsed = new URL(normalized);
     const sessionId = parsed.searchParams.get('session');
-    const token = parsed.searchParams.get('token');
+    const connectCode = parsed.searchParams.get('code');
     const apiUrl = parsed.searchParams.get('api');
 
-    if (!sessionId || !token || !apiUrl) {
+    if (!sessionId || !connectCode || !apiUrl) {
       return null;
     }
 
-    return { sessionId, token, apiUrl };
+    return { sessionId, connectCode, apiUrl };
   } catch {
     return null;
   }
@@ -30,8 +30,7 @@ export function parseDeepLink(url: string): ConnectionParams | null {
 /**
  * Build the WebSocket URL for a desktop session
  */
-export function buildWsUrl(params: ConnectionParams): string {
-  const { apiUrl, sessionId, token } = params;
+export function buildWsUrl(apiUrl: string, sessionId: string, ticket: string): string {
   const wsBase = apiUrl.replace(/^http/, 'ws');
-  return `${wsBase}/api/v1/desktop-ws/${sessionId}/ws?token=${encodeURIComponent(token)}`;
+  return `${wsBase}/api/v1/desktop-ws/${sessionId}/ws?ticket=${encodeURIComponent(ticket)}`;
 }

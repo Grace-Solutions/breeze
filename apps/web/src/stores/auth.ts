@@ -117,6 +117,36 @@ function buildApiUrl(path: string): string {
   return `${API_HOST}/api/v1${cleanPath}`;
 }
 
+async function requestTokenRefresh(): Promise<Tokens | null> {
+  const refreshResponse = await fetch(buildApiUrl('/auth/refresh'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      [CSRF_HEADER_NAME]: CSRF_HEADER_VALUE
+    },
+    credentials: 'include',
+    body: JSON.stringify({})
+  });
+
+  if (!refreshResponse.ok) {
+    return null;
+  }
+
+  const { tokens } = await refreshResponse.json() as { tokens?: Tokens };
+  return tokens?.accessToken ? tokens : null;
+}
+
+export async function restoreAccessTokenFromCookie(): Promise<boolean> {
+  try {
+    const tokens = await requestTokenRefresh();
+    if (!tokens) return false;
+    useAuthStore.getState().setTokens(tokens);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Response> {
   const { tokens, logout, setTokens } = useAuthStore.getState();
 
@@ -132,22 +162,8 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}): Pro
 
   // If unauthorized, attempt cookie-backed refresh once
   if (response.status === 401) {
-    const refreshResponse = await fetch(buildApiUrl('/auth/refresh'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [CSRF_HEADER_NAME]: CSRF_HEADER_VALUE
-      },
-      credentials: 'include',
-      body: JSON.stringify({})
-    });
-
-    if (refreshResponse.ok) {
-      const { tokens: newTokens } = await refreshResponse.json() as { tokens?: Tokens };
-      if (!newTokens?.accessToken) {
-        logout();
-        return response;
-      }
+    const newTokens = await requestTokenRefresh();
+    if (newTokens) {
       setTokens(newTokens);
 
       // Retry original request with new token

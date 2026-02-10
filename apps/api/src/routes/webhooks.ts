@@ -85,7 +85,8 @@ function toWorkerWebhookConfig(webhook: typeof webhooksTable.$inferSelect): Work
   if (webhook.secret) {
     try {
       secret = decryptSecret(webhook.secret) ?? undefined;
-    } catch {
+    } catch (error) {
+      console.error(`[webhooks] Failed to decrypt secret for webhook ${webhook.id}:`, error);
       secret = undefined;
     }
   }

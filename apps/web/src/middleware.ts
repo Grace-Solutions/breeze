@@ -1,5 +1,31 @@
 import { defineMiddleware } from 'astro:middleware';
 
+function resolveConnectSrcDirective(): string {
+  const sources = new Set<string>(["'self'", 'https:', 'ws:', 'wss:']);
+  const configuredApiUrl = process.env.PUBLIC_API_URL;
+
+  if (configuredApiUrl) {
+    try {
+      const parsed = new URL(configuredApiUrl);
+      sources.add(parsed.origin);
+      if (parsed.protocol === 'http:') {
+        sources.add(`ws://${parsed.host}`);
+      } else if (parsed.protocol === 'https:') {
+        sources.add(`wss://${parsed.host}`);
+      }
+    } catch {
+      // Ignore invalid URL configuration and fall back to default policy.
+    }
+  }
+
+  if (import.meta.env.DEV) {
+    sources.add('http://localhost:3001');
+    sources.add('ws://localhost:3001');
+  }
+
+  return `connect-src ${Array.from(sources).join(' ')}`;
+}
+
 const cspDirectives = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -10,7 +36,7 @@ const cspDirectives = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: https:",
   "font-src 'self' data:",
-  "connect-src 'self' https: ws: wss:"
+  resolveConnectSrcDirective()
 ].join('; ');
 
 export const onRequest = defineMiddleware(async (_context, next) => {
