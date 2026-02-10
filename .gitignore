@@ -65,4 +65,5 @@ CLAUDE.md
 
 # Stray screenshots
 *.png
+!docs/assets/breeze-logo.png
 .worktrees/
